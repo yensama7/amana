@@ -1,0 +1,40 @@
+# Amana Gateway — full stack: postgres + gateway API + Next.js frontend.
+# Run everything with:  docker compose up --build
+# Then open http://localhost:3000
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: amana
+      POSTGRES_PASSWORD: amana
+      POSTGRES_DB: amana
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amana"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    # No host port published on purpose — only the API talks to it.
+
+  api:
+    build:
+      context: .
+      target: api          # stage 2 of the Dockerfile
+    environment:
+      DATABASE_URL: postgres://amana:amana@db:5432/amana
+      PORT: "4000"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Host port 4200 (not 4000): Windows/Hyper-V often reserves the
+      # 3900-4100 range. Inside the compose network it is still :4000.
+      - "4200:4000"        # exposed for the smoke test (api/test/smoke.js)
+
+  web:
+    build:
+      context: .
+      target: web          # stage 3 of the Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"

@@ -1,0 +1,18 @@
+{
+  "name": "amana-wallet-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Amana Gateway frontend — citizen wallet, consent dashboard, and mock loan app",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "circomlibjs": "^0.1.7",
+    "next": "^14.2.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "snarkjs": "^0.7.4"
+  }
+}

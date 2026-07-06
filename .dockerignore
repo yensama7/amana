@@ -1,0 +1,9 @@
+# Keep the build context small and never leak host build artifacts into the
+# image — circuits are compiled INSIDE the circuits stage.
+**/node_modules
+**/.next
+build
+web/public/zk
+api/zk
+.git
+*.md

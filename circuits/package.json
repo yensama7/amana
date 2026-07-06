@@ -1,0 +1,8 @@
+{
+  "name": "amana-circuits",
+  "private": true,
+  "description": "Circom sources for Amana Gateway. circomlib provides Poseidon + comparators.",
+  "dependencies": {
+    "circomlib": "^2.0.5"
+  }
+}

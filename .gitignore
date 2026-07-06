@@ -1,0 +1,7 @@
+node_modules/
+.next/
+build/
+# generated ZK artifacts (rebuild with scripts/build-circuits.sh)
+web/public/zk/
+api/zk/
+.env
