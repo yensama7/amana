@@ -62,6 +62,23 @@ async function getCredential(kind) {
 }
 
 // ---------------------------------------------------------------------------
+// Citizen: onboard via NIMC PKI Trust Bridge.
+// Body: { nimcPayload, pkiSignature, citizenSecret, citizenSalt }
+// ---------------------------------------------------------------------------
+router.post('/citizen/onboard', async (req, res) => {
+  const { nimcPayload, pkiSignature, citizenSecret, citizenSalt } = req.body || {};
+  if (!nimcPayload || !pkiSignature || !citizenSecret || !citizenSalt) {
+    return res.status(400).json({ error: 'nimcPayload, pkiSignature, citizenSecret, citizenSalt are required' });
+  }
+  try {
+    const cred = await registry.bridgeNIMCToken(nimcPayload, pkiSignature, citizenSecret, citizenSalt);
+    res.json({ success: true, commitment: cred.commitment });
+  } catch (err) {
+    res.status(err.message.includes('Invalid') ? 400 : 500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Company: start a verification request.
 // Body: { rpId, rpName, amanaId, minScore?, bvnHash? }
 //   amanaId  — the pairwise ID the citizen gave this company (replaces

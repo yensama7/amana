@@ -22,6 +22,7 @@
 const crypto = require('crypto');
 const { buildPoseidon, buildEddsa } = require('circomlibjs');
 const { pool } = require('./db');
+const { verifyNIMCSignature, signNIMCPayload } = require('./pki');
 
 // Our synthetic citizen. Every value is kept as a decimal string because
 // they are all "field elements" (numbers the ZK math can work with).
@@ -92,33 +93,39 @@ async function issue(kind, attrs, commitment) {
   );
 }
 
+// Trust Bridge: verify NIMC PKI sig out-of-circuit, re-hash with Poseidon,
+// sign with EdDSA, store as ZK-friendly identity credential.
+async function bridgeNIMCToken(nimcPayload, pkiSignature, citizenSecret, citizenSalt) {
+  if (!verifyNIMCSignature(nimcPayload, pkiSignature)) {
+    throw new Error('Invalid NIMC PKI signature');
+  }
+  const commitment = hash([
+    nimcPayload.nin, nimcPayload.bvn, nimcPayload.dob,
+    nimcPayload.state, nimcPayload.citizenship,
+    citizenSecret, citizenSalt,
+  ]);
+  await issue('identity', { ...nimcPayload, secret: citizenSecret, salt: citizenSalt }, commitment);
+  const r = await pool.query('SELECT * FROM credentials WHERE kind = $1', ['identity']);
+  return r.rows[0];
+}
+
 // Issue (or re-issue) both demo credentials. Runs on every boot; the data
 // is synthetic so overwriting is harmless and keeps the demo self-healing.
 async function seed() {
-  // The wallet secret: the single random value that powers all amanaIds.
-  // In a real system the WALLET generates this and the issuers never see
-  // it in the clear — here both mock issuers live in one process, so we
-  // just generate it once and share it (demo shortcut).
   const secret = randomField();
 
-  // --- identity credential (national registry) ---
-  const salt = randomField(); // extra randomness so the sealed hash can't be guess-and-checked
-  const idAttrs = { ...CITIZEN, secret, salt };
-  const idCommitment = hash([
-    idAttrs.nin, idAttrs.bvn, idAttrs.dob, idAttrs.state,
-    idAttrs.citizenship, secret, salt,
-  ]);
-  await issue('identity', idAttrs, idCommitment);
+  // identity via Trust Bridge — NIMC signs with RSA, gateway verifies then re-issues ZK-friendly credential
+  const salt = randomField();
+  const pkiSig = signNIMCPayload(CITIZEN);
+  const idCred = await bridgeNIMCToken(CITIZEN, pkiSig, secret, salt);
 
   // --- credit credential (credit bureau) — same secret, own salt ---
   const creditSalt = randomField();
   const crAttrs = { ...CREDIT, secret, salt: creditSalt };
-  const crCommitment = hash([
-    crAttrs.score, crAttrs.activeLoans, crAttrs.defaults, secret, creditSalt,
-  ]);
+  const crCommitment = hash([crAttrs.score, crAttrs.activeLoans, crAttrs.defaults, secret, creditSalt]);
   await issue('credit', crAttrs, crCommitment);
 
-  console.log('[registry] identity credential issued, commitment =', idCommitment.slice(0, 20) + '…');
+  console.log('[registry] identity credential issued, commitment =', idCred.commitment.slice(0, 20) + '…');
   console.log('[bureau]   credit credential issued, commitment =', crCommitment.slice(0, 20) + '…');
 }
 
@@ -134,4 +141,4 @@ function verifySignature(cred) {
   return eddsa.verifyPoseidon(Fb.e(cred.commitment), sig, pubKey);
 }
 
-module.exports = { init, seed, hash, verifySignature };
+module.exports = { init, seed, hash, verifySignature, bridgeNIMCToken };

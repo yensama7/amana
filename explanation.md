@@ -28,11 +28,35 @@ There are four actors in every transaction. In the demo, they all live on your l
 
 ---
 
+## The NIMC Act 2026: why the government's digital stamp needs a translator
+
+Under the NIMC Act 2026, every Nigerian digital identity system must be anchored to a government-issued root certificate — think of it as an official wax seal from the Federal Government that says "this person's identity has been verified by the State."
+
+That requirement is good news for trust. But it creates a technical problem.
+
+The government's digital seal uses a type of cryptography that was designed for traditional computers — powerful, well-established, but slow. Asking a phone to verify that government seal *inside* a zero-knowledge proof would be like requiring someone to recite the entire Nigerian constitution as part of answering a simple yes-or-no question. Technically possible. Practically useless.
+
+**The Trust Bridge solves this.** It lives in the Amana Gateway and works in four steps:
+
+1. **NIMC issues a signed payload.** The government produces a digital document containing the citizen's NIN, BVN, date of birth, state of origin, and citizenship status — and stamps it with its official digital signature. This is the government saying: *"We verified this person. Here is our seal."*
+
+2. **The Gateway checks the government's seal — the normal way.** The Gateway performs a standard verification of that signature on its own servers. No zero-knowledge involved here; it uses exactly the kind of cryptography every secure website on the internet uses. If the seal does not pass, the process stops immediately.
+
+3. **If the seal is genuine, the Gateway translates the credential.** It takes the same identity data, runs it through a ZK-friendly mathematical process (Poseidon hash + BabyJubjub signature), and produces a new, lighter-weight credential. Think of the Gateway as saying: *"I have personally verified the government's stamp. I am now issuing my own version — one that a mobile device can work with efficiently."*
+
+4. **The citizen receives this bridged credential** and uses it for all the zero-knowledge proofs described in this document.
+
+The chain of trust is never broken: the Gateway's credential is only issued when the government's original stamp passes verification. No citizen receives a working ZK credential unless NIMC vouched for them first. The government's authority is the foundation; the Gateway is the translator.
+
+**In the demo**, this full flow runs on every server start. The demo simulates NIMC by signing the citizen's data, then passes that signature to the Gateway's onboarding endpoint (`POST /api/citizen/onboard`), which verifies it and issues the bridged credential. A real deployment would replace the demo signature with a genuine NIMC-issued token from the National Identity Management System.
+
+---
+
 ## The two sealed envelopes
 
 When the citizen registers, two things happen:
 
-1. The **National Registry** takes the citizen's identity data (NIN, BVN, date of birth, state, citizenship) and runs it through a mathematical blender called **Poseidon hash**. The result is a single large number — called the **identity commitment** — that represents all that data without revealing any of it. The Registry then signs this number with its digital signature and hands the citizen a sealed envelope: *"I, the Registry, certify that this number correctly represents this citizen's attributes."*
+1. The **National Registry** takes the citizen's identity data — after the Trust Bridge has verified the government's original stamp (described above) — and produces a sealed, ZK-friendly version. This is the **identity commitment**: a single large number that represents everything about the citizen without revealing any of it. The Gateway signs this number on the Registry's behalf and hands the citizen a sealed envelope: *"The government vouched for this person, we have checked that vouching, and here is the credential that proves it."*
 
 2. The **Credit Bureau** does the same thing with the citizen's credit data (score, active loans, defaults). Same kind of sealed envelope, called the **credit commitment**.
 
@@ -187,6 +211,8 @@ This system is built for a 48-hour hackathon. Several things are simplified that
 | Company IDs (1001, 2002) are hardcoded in the UI and API | Companies register with the gateway operator and receive an assigned ID — like registering for OAuth client credentials |
 | The gateway serves the credential (including the wallet secret) to the browser | The wallet generates the secret on-device; it never leaves the device; the credential is provisioned over a secure channel at registration time |
 | Both mock issuers (Registry + Bureau) run in the same server process and generate fresh keys every boot | Each issuer is a separate institution with long-lived keys in a Hardware Security Module (HSM) |
+| The demo generates its own RSA key pair on startup to simulate the NIMC root certificate | A real deployment would pin the actual NIMC Root CA certificate, published by the government |
+| The demo signs the citizen's data itself (acting as NIMC) and passes that signature to the Trust Bridge | NIMC would issue the signed token directly to the citizen through the official NIMC enrolment process |
 | A single synthetic citizen, no authentication on wallet/dashboard | Real wallets require device authentication (biometric, PIN); the gateway authenticates each session |
 | Trusted setup for circuits is single-party (one computer ran the ceremony) | A real deployment requires a multi-party trusted setup ceremony, where many independent parties each contribute randomness and destroy their contribution — security holds as long as at least one participant is honest |
 | Credit credential is re-signed on every server restart | A real credential is issued once, stored on-device, and has an expiry date and a revocation mechanism |
