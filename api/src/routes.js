@@ -62,6 +62,18 @@ async function getCredential(kind) {
 }
 
 // ---------------------------------------------------------------------------
+// Judge / demo: live trace of the Trust Bridge — no DB write.
+// Opens in any browser: http://localhost:4200/api/trust-bridge/trace
+// ---------------------------------------------------------------------------
+router.get('/trust-bridge/trace', async (_req, res) => {
+  try {
+    res.json(await registry.traceNIMCBridge());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Citizen: onboard via NIMC PKI Trust Bridge.
 // Body: { nimcPayload, pkiSignature, citizenSecret, citizenSalt }
 // ---------------------------------------------------------------------------

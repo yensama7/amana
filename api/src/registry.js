@@ -141,4 +141,79 @@ function verifySignature(cred) {
   return eddsa.verifyPoseidon(Fb.e(cred.commitment), sig, pubKey);
 }
 
-module.exports = { init, seed, hash, verifySignature, bridgeNIMCToken };
+// Dry-run the full Trust Bridge and return every intermediate value.
+// No database write — safe to call at any time without affecting live credentials.
+async function traceNIMCBridge() {
+  const secret = randomField();
+  const salt = randomField();
+
+  const pkiSignature = signNIMCPayload(CITIZEN);
+  const pkiValid = verifyNIMCSignature(CITIZEN, pkiSignature);
+
+  const inputs = [
+    CITIZEN.nin, CITIZEN.bvn, CITIZEN.dob,
+    CITIZEN.state, CITIZEN.citizenship,
+    secret, salt,
+  ];
+  const commitment = hash(inputs);
+
+  const prvKey = crypto.randomBytes(32);
+  const pubKey = eddsa.prv2pub(prvKey);
+  const sig = eddsa.signPoseidon(prvKey, Fb.e(commitment));
+
+  return {
+    description: 'National PKI to ZK Trust Bridge — live trace (no DB write)',
+    why: 'RSA (used by NIMC) costs tens of thousands of constraints inside a ZK circuit — too slow for a mobile device. The Gateway verifies it once, out-of-circuit, then re-issues a ZK-friendly credential the phone can work with.',
+    steps: [
+      {
+        step: 1,
+        name: 'NIMC signs citizen payload (RSA-2048 / SHA-256)',
+        what: 'The government authority signs the raw identity data with its root private key. This is the official government stamp.',
+        output: {
+          payload: {
+            nin: CITIZEN.nin, bvn: CITIZEN.bvn, dob: CITIZEN.dob,
+            state: CITIZEN.state, citizenship: CITIZEN.citizenship,
+          },
+          signature: pkiSignature.slice(0, 64) + '…',
+          algorithm: 'RSA-SHA256',
+        },
+      },
+      {
+        step: 2,
+        name: 'Gateway verifies RSA signature (out-of-circuit)',
+        what: "Standard crypto.createVerify('SHA256') — the same cryptography HTTPS uses. No ZK circuit involved. If this fails, the flow stops here.",
+        output: { valid: pkiValid },
+      },
+      {
+        step: 3,
+        name: 'Poseidon re-hash (ZK-friendly)',
+        what: 'The identity data is re-hashed with Poseidon — designed to cost ~250 constraints inside a ZK circuit vs tens of thousands for SHA-256. The input order is fixed and must match the Circom circuits exactly.',
+        output: {
+          inputOrder: ['nin', 'bvn', 'dob', 'state', 'citizenship', 'secret', 'salt'],
+          commitment,
+        },
+      },
+      {
+        step: 4,
+        name: 'BabyJubjub EdDSA signature',
+        what: 'The commitment is signed with a ZK-friendly elliptic curve key. A Circom circuit can verify this signature efficiently — this is what makes in-browser ZK proving fast.',
+        output: {
+          R8x: Fb.toString(sig.R8[0]),
+          R8y: Fb.toString(sig.R8[1]),
+          S: sig.S.toString(),
+          pubKey_Ax: Fb.toString(pubKey[0]),
+          pubKey_Ay: Fb.toString(pubKey[1]),
+        },
+      },
+      {
+        step: 5,
+        name: 'ZK-friendly credential ready',
+        what: "In the live flow this is saved to the database. The citizen's wallet can now generate Groth16 proofs using only the Poseidon commitment and EdDSA signature — the original RSA signature is never seen again.",
+        output: { kind: 'identity', commitment },
+      },
+    ],
+    summary: 'Government RSA signature verified out-of-circuit (step 2). Poseidon + EdDSA credential issued (steps 3–4). Chain of trust: NIMC root key → Gateway verification → ZK credential. The citizen never needs to expose their NIN, BVN, or DOB to any company.',
+  };
+}
+
+module.exports = { init, seed, hash, verifySignature, bridgeNIMCToken, traceNIMCBridge };

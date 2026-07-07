@@ -50,6 +50,14 @@ The chain of trust is never broken: the Gateway's credential is only issued when
 
 **In the demo**, this full flow runs on every server start. The demo simulates NIMC by signing the citizen's data, then passes that signature to the Gateway's onboarding endpoint (`POST /api/citizen/onboard`), which verifies it and issues the bridged credential. A real deployment would replace the demo signature with a genuine NIMC-issued token from the National Identity Management System.
 
+**Want to see it happen live?** Open this URL while the demo is running:
+
+```
+http://localhost:4200/api/trust-bridge/trace
+```
+
+The Gateway will run the full Trust Bridge on the spot — without touching the database or the live credentials — and return a step-by-step JSON showing every stage: the government's RSA signature, the verification result, the Poseidon commitment, and the final BabyJubjub EdDSA signature. Each step includes a plain-English explanation of what is happening and why.
+
 ---
 
 ## The two sealed envelopes

@@ -29,6 +29,26 @@ Open three browser tabs: **Citizen Wallet**, **SwiftLoan**, and **Consent Dashbo
 
 **Try to cheat:** paste your GTBank ID (or any random number) into SwiftLoan's form. Verification fails — the math simply refuses to produce a proof for an ID that isn't yours *at that company*. That's the whole point: a stolen amanaId is worthless.
 
+## See what happens under the hood (NIMC Act 2026 — Trust Bridge)
+
+Open this URL while the stack is running:
+
+```
+http://localhost:4200/api/trust-bridge/trace
+```
+
+The Gateway runs the full **National PKI to ZK Trust Bridge** live and returns a step-by-step JSON you can read in any browser or paste into a JSON viewer. You will see:
+
+| Step | What it shows |
+|---|---|
+| **1 — NIMC RSA signature** | The government's raw digital stamp on the citizen's identity payload (NIN, BVN, DOB, state, citizenship), signed with RSA-2048 |
+| **2 — Out-of-circuit verification** | The Gateway's `VALID` result from verifying that stamp using standard cryptography — this is the step the NIMC Act 2026 requires |
+| **3 — Poseidon re-hash** | The same identity data, re-hashed with Poseidon in the exact input order the ZK circuits expect |
+| **4 — BabyJubjub EdDSA signature** | The ZK-friendly signature (R8x, R8y, S) and public key the citizen's wallet will use to generate Groth16 proofs |
+| **5 — Credential ready** | The final commitment that anchors every proof in the demo |
+
+The trace is a dry run — it does not write to the database or affect the live session. Every call generates fresh values so you can see the cryptography is live, not cached.
+
 ## Why this design matters (in plain words)
 
 **The BVN problem.** Your BVN does two jobs at once: it *points* to your records, and knowing it is treated as *proof it's yours*. That second job is why leaked BVNs are dangerous. Amana splits the jobs: the amanaId only points; ZK proofs do all the proving. Numbers stop being secrets worth stealing.
@@ -110,6 +130,8 @@ docker-compose.yml   postgres + api (host :4200 → container :4000) + web (:300
 | `POST /api/linkage/start` / `/api/linkage/complete` | wallet | consent-based ID linkage (id_linkage proof) |
 | `GET /api/credential` | wallet | both signed credentials (demo stand-in for on-device storage) |
 | `GET /api/audit` | dashboard | who asked, what, outcome |
+| `GET /api/trust-bridge/trace` | judges / demo | dry-run the full NIMC PKI → ZK Trust Bridge; returns step-by-step JSON with RSA sig, Poseidon commitment, EdDSA output — no DB write |
+| `POST /api/citizen/onboard` | onboarding | `{nimcPayload, pkiSignature, citizenSecret, citizenSalt}` → verifies RSA sig, issues ZK credential, returns `{success, commitment}` |
 | `POST /api/revoke` / `/api/unrevoke`, `GET /api/revocations` | dashboard | per-company blocking |
 
 ### Running without Docker (dev)
