@@ -16,18 +16,17 @@ docker compose up -d --build
 
 The first build takes a few minutes (it compiles the cryptographic circuits). When it settles, open **http://localhost:3000**.
 
-## The 6-step demo
+## The demo
 
-Open three browser tabs: **Citizen Wallet**, **SwiftLoan**, and **Consent Dashboard** (all linked from the home page).
+Open four browser tabs: **Amana Way** (the citizen wallet), **Swift Loan**, **ABC Loan**, and **Consent Dashboard** (all linked from the home page).
 
-1. **Wallet** — see your two sealed credentials (identity, signed by the National Registry; credit file, signed by the credit bureau) and your **amanaIds**. Copy the SwiftLoan one.
-2. **SwiftLoan** — paste the ID and apply for a loan. Notice what's *missing*: there is no BVN or NIN field anywhere. The lender only ever gets an opaque code.
-3. **Wallet** — a consent request pops up, listing *exactly* what SwiftLoan wants proven: over 18, Nigerian citizen, this ID is really yours, credit score ≥ 650. Approve it.
-4. Watch four proofs generate in your browser (the ticking counter shows the page never freezes — the heavy math runs on a background thread). SwiftLoan receives **verified: true** and a receipt. Nothing else.
-5. **Wallet** — click **"Authorise SwiftLoan ↔ GTBank link"**. Your IDs at different companies are normally *mathematically impossible to connect* — this button is your signed, logged permission slip letting the credit bureau connect them to build your credit history. It appears on your dashboard like everything else.
-6. **Dashboard** — see the full audit trail (who asked, what, when, outcome), then hit **Revoke** on SwiftLoan and try applying again: blocked instantly, and the blocked attempt is logged too.
+1. **Amana Way** — see your two sealed credentials (identity, signed by the National Registry; credit file, signed by the credit bureau) and your **amanaIds**, one per company. Copy the Swift Loan one.
+2. **Swift Loan** — paste the ID and apply. Notice what's *missing*: no BVN or NIN field. Swift Loan asks for four proofs: over 18, Nigerian citizen, ID ownership, and credit score ≥ 600. The lender only ever gets an opaque code.
+3. **ABC Loan** — click "Check eligibility" (no ID to paste — ABC Loan only needs to know you're over 18 and a Nigerian citizen). This demonstrates that ZK is **modular**: each lender requests exactly the proofs it needs, nothing more.
+4. **Amana Way** — consent requests appear for each pending application, listing *exactly* what each lender wants proven. Approve them. Watch proofs generate in your browser (the ticking counter shows the page never freezes — the heavy math runs on parallel background threads). Each lender receives **verified: true** and a receipt. Nothing else.
+5. **Dashboard** — see the full audit trail (who asked, what, when, outcome), then hit **Revoke** on Swift Loan and try applying again: blocked instantly, and the blocked attempt is logged too.
 
-**Try to cheat:** paste your GTBank ID (or any random number) into SwiftLoan's form. Verification fails — the math simply refuses to produce a proof for an ID that isn't yours *at that company*. That's the whole point: a stolen amanaId is worthless.
+**Try to cheat:** paste your ABC Loan ID (or any random number) into Swift Loan's form. Verification fails — the math simply refuses to produce a proof for an ID that isn't yours *at that company*. That's the whole point: a stolen amanaId is worthless.
 
 ## See what happens under the hood (NIMC Act 2026 — Trust Bridge)
 
@@ -91,7 +90,7 @@ amanaId(company)    = Poseidon(secret, companyId)     ← pairwise, unlinkable
 
 Issuer signatures (EdDSA over Baby Jubjub) are verified **outside** the circuits, keeping every circuit at a few hundred constraints — that's what makes in-browser proving near-instant.
 
-### The six circuits (`circuits/`)
+### The four circuits (`circuits/`)
 
 | Circuit | Statement proven | Extra public inputs |
 |---|---|---|
@@ -99,8 +98,6 @@ Issuer signatures (EdDSA over Baby Jubjub) are verified **outside** the circuits
 | `citizenship_ng` | committed citizenship = 566 (ISO code, Nigeria) | — |
 | `id_ownership` | `Poseidon(secret, rpId) = amanaId` for the committed secret | `amanaId` |
 | `credit_score_gte` | committed `score ≥ minScore` (bureau-signed commitment) | `minScore` |
-| `id_linkage` | two amanaIds derive from the same committed secret | `rpIdA, idA, rpIdB, idB` |
-| `bvn_match` | committed BVN hashes to the RP-supplied `Poseidon(bvn)` — legacy/hybrid path for RPs that already hold a BVN | `bvnHash` |
 
 All bind the citizen's private attributes to the issuer-signed commitment (shared `credential.circom`), and all carry `rpId` + one-time `nonce` as public inputs for replay protection.
 
@@ -110,7 +107,7 @@ All bind the citizen's private attributes to the issuer-signed commitment (share
 circuits/            Circom sources (+ shared credential.circom)
 scripts/build-circuits.sh   compile → local ptau (2^13) → Groth16 setup → export artifacts
 api/                 Express gateway + mock issuers (src/), smoke test (test/)
-web/                 Next.js PWA: /wallet, /dashboard, /loan; prover Web Worker in lib/
+web/                 Next.js PWA: /wallet, /dashboard, /swift-loan, /abc-loan; prover Web Worker in lib/
 Dockerfile           3 stages: circuits → api → web (compose picks per-service targets)
 docker-compose.yml   postgres + api (host :4200 → container :4000) + web (:3000)
 ```
@@ -122,12 +119,11 @@ docker-compose.yml   postgres + api (host :4200 → container :4000) + web (:300
 
 | Method & path | Who calls it | Purpose |
 |---|---|---|
-| `POST /api/request` | company | `{rpId, rpName, amanaId, minScore?, bvnHash?}` → claims derived from what was asked; **403 if revoked** |
+| `POST /api/request` | company | `{rpId, rpName, amanaId?, minScore?}` → claims derived from what was asked; **403 if revoked** |
 | `GET /api/requests/pending` | wallet | consent requests awaiting the citizen |
 | `GET /api/requests/:id` | company | poll outcome `{status, ok, receiptId}` |
 | `POST /api/requests/:id/deny` | wallet | citizen denied (or proving failed) |
 | `POST /api/verify` | wallet | submit `{requestId, proofs}` → full verification → `{ok, receiptId}` |
-| `POST /api/linkage/start` / `/api/linkage/complete` | wallet | consent-based ID linkage (id_linkage proof) |
 | `GET /api/credential` | wallet | both signed credentials (demo stand-in for on-device storage) |
 | `GET /api/audit` | dashboard | who asked, what, outcome |
 | `GET /api/trust-bridge/trace` | judges / demo | dry-run the full NIMC PKI → ZK Trust Bridge; returns step-by-step JSON with RSA sig, Poseidon commitment, EdDSA output — no DB write |
@@ -158,7 +154,7 @@ With the stack running and circuits built locally (step 1 above):
 cd api && npm run smoke
 ```
 
-It plays company + wallet from Node: opens a request with an amanaId, generates all four proofs, asserts the gateway returns `true`, replays the proofs and asserts rejection, then runs a full linkage authorisation and asserts it's accepted.
+It plays company + wallet from Node: opens a request with an amanaId, generates all four proofs in parallel, asserts the gateway returns `true`, then replays the same proofs and asserts rejection (nonce burned).
 
 ### Honest limitations (hackathon shortcuts)
 
@@ -166,5 +162,5 @@ It plays company + wallet from Node: opens a request with an amanaId, generates 
 - **The gateway serves the credentials** (attributes + secret + salt) to the wallet via `GET /api/credential`. A real wallet keeps these on-device; this stands in for provisioning.
 - **Both mock issuers live in the gateway process** and regenerate their keypairs per boot; the wallet secret is generated by the issuer instead of the wallet. Real issuers are separate services with long-lived HSM keys, and the secret never leaves the wallet.
 - **One synthetic citizen, no auth** on wallet/dashboard routes.
-- **PWA-lite**: manifest only, no offline service worker.
+- **PWA**: manifest + service worker registered for offline shell caching; no background sync or push notifications.
 - Age check ignores leap-day pedantry (YYYYMMDD integer compare — off by at most one day for Feb 29 birthdays).

@@ -1,40 +1,50 @@
 'use client';
-// Citizen Wallet — holds the two signed credentials (identity + credit),
-// shows the citizen their shareable amanaIds, runs the consent screen, and
-// generates ZK proofs in a Web Worker when the citizen approves.
+// Amana Way — the citizen-facing identity wallet.
+//
+// This component does three things:
+//   1. Loads the citizen's two signed credentials (identity + credit) from the gateway.
+//   2. Derives a unique, unlinkable amanaId for each company using Poseidon(secret, companyId).
+//      The same citizen gets a DIFFERENT id for Swift Loan vs ABC Loan — companies can't
+//      combine records without the citizen's explicit cryptographic permission.
+//   3. When a company sends a consent request, the citizen sees exactly what will be proved
+//      and can Approve (generating ZK proofs) or Deny.
+//
+// ZK proof generation runs in separate Web Worker threads (one per circuit) so the UI
+// stays responsive. All circuits run in parallel via Promise.all — the "liveness counter"
+// below is visual proof that the main thread never blocks.
 import { useEffect, useRef, useState } from 'react';
+import ZKTerminal from '../components/ZKTerminal';
 
 // Human-readable descriptions of what each circuit actually proves.
-// The consent screen shows EXACTLY these — nothing more is disclosed.
+// The consent screen shows EXACTLY these labels — nothing more is disclosed.
 const CLAIM_LABELS = {
-  age_gte_18: 'You are 18 or older (your date of birth stays private)',
-  citizenship_ng: 'You are a Nigerian citizen',
-  id_ownership: 'The amanaId this company holds really belongs to this wallet (your NIN/BVN stay private)',
+  age_gte_18:       'You are 18 or older (your date of birth stays private)',
+  citizenship_ng:   'You are a Nigerian citizen',
+  id_ownership:     'The amanaId this company holds really belongs to this wallet (your NIN/BVN stay private)',
   credit_score_gte: 'Your credit score meets their minimum (the actual score stays private)',
-  bvn_match: 'The BVN the requester holds is yours (the BVN itself stays private)',
 };
 
-// Companies the demo knows about. amanaIds are derived per-company, so
-// each of these gets a DIFFERENT id for the same citizen.
+// The two accredited companies in the Amana Way demo.
+// amanaId = Poseidon(secret, companyId) — each company gets a different opaque identifier
+// for the same citizen. A stolen ID is useless because only this wallet can prove ownership.
 const COMPANIES = [
-  { id: '1001', name: 'SwiftLoan' },
-  { id: '2002', name: 'GTBank' },
+  { id: '1001', name: 'Swift Loan' },
+  { id: '2002', name: 'ABC Loan' },
 ];
 
 export default function Wallet() {
-  const [creds, setCreds] = useState(null);      // { identity, credit }
-  const [amanaIds, setAmanaIds] = useState(null); // { [companyId]: derived id }
-  const [request, setRequest] = useState(null);   // pending consent request, if any
-  const [proving, setProving] = useState(null);   // circuit currently being proven
-  const [result, setResult] = useState(null);     // last gateway verdict
-  const [linkState, setLinkState] = useState('idle'); // idle | working | linked | error
+  const [creds, setCreds] = useState(null);      // { identity, credit } — loaded from gateway
+  const [amanaIds, setAmanaIds] = useState(null); // { [companyId]: derived BigInt string }
+  const [request, setRequest] = useState(null);   // pending consent request from a company
+  const [proving, setProving] = useState(null);   // 'all' | 'submitting' | null
+  const [result, setResult] = useState(null);     // last gateway verdict { ok, receiptId }
   const [error, setError] = useState(null);
-  const [tick, setTick] = useState(0);            // main-thread liveness counter
-  const workerRef = useRef(null);
+  const [tick, setTick] = useState(0);            // main-thread liveness counter (increments 10x/sec)
   const poseidonRef = useRef(null);
   const busy = proving !== null;
 
-  // Same Poseidon the circuits use — needed to derive amanaIds locally.
+  // Build and cache the Poseidon hasher — same implementation the Circom circuits use,
+  // so the amanaIds derived here are guaranteed to match what the circuits expect.
   async function getPoseidon() {
     if (!poseidonRef.current) {
       const { buildPoseidon } = await import('circomlibjs');
@@ -43,8 +53,9 @@ export default function Wallet() {
     return poseidonRef.current;
   }
 
-  // Load credentials once, then derive this wallet's amanaId for each
-  // known company: amanaId = Poseidon(secret, companyId).
+  // On mount: load credentials from the gateway, then derive amanaIds locally.
+  // In a real deployment, credentials live in secure on-device storage; the gateway
+  // serving them here is a hackathon shortcut.
   useEffect(() => {
     (async () => {
       try {
@@ -53,14 +64,17 @@ export default function Wallet() {
         const poseidon = await getPoseidon();
         const ids = {};
         for (const co of COMPANIES) {
+          // amanaId = Poseidon(walletSecret, companyId)
+          // This is a one-way function: given amanaId + companyId you cannot recover the secret.
           ids[co.id] = poseidon.F.toString(poseidon([BigInt(c.identity.attrs.secret), BigInt(co.id)]));
         }
         setAmanaIds(ids);
-      } catch { /* gateway not up yet; refresh the page */ }
+      } catch { /* gateway not up yet — user can refresh */ }
     })();
   }, []);
 
-  // Poll the gateway for pending consent requests while idle.
+  // While idle, poll the gateway every 2 seconds for pending consent requests.
+  // Stops polling during proof generation (busy = true) to avoid race conditions.
   useEffect(() => {
     if (busy) return;
     const t = setInterval(async () => {
@@ -72,31 +86,35 @@ export default function Wallet() {
     return () => clearInterval(t);
   }, [busy]);
 
-  // This counter increments 10x/second on the MAIN thread. If proving ran
-  // on the main thread it would freeze — its smooth ticking during proof
-  // generation is the visible evidence that the Web Worker is doing the work.
+  // The liveness counter ticks 10x/second on the MAIN thread.
+  // If proofs ran on the main thread, this would freeze during proving.
+  // Its smooth ticking is visible proof that Web Workers handle the heavy lifting.
   useEffect(() => {
     const t = setInterval(() => setTick((x) => x + 1), 100);
     return () => clearInterval(t);
   }, []);
 
-  // Send one job to the prover worker and await its reply.
+  // Spawn a fresh Worker per circuit so Promise.all can run all proofs in true parallel.
+  // Each worker loads snarkjs once, generates one proof, then is terminated.
+  // The .wasm and .zkey files are fetched by the worker and cached in the Cache API
+  // (see prover.worker.js) so subsequent runs load instantly from memory.
   function prove(circuit, inputs) {
-    if (!workerRef.current) {
-      // Lazy-init: the worker pulls in snarkjs (heavy), so only pay that
-      // cost when the user actually approves something.
-      workerRef.current = new Worker(new URL('../../lib/prover.worker.js', import.meta.url));
-    }
+    const worker = new Worker(new URL('../../lib/prover.worker.js', import.meta.url));
     return new Promise((resolve, reject) => {
-      const w = workerRef.current;
-      w.onmessage = (e) =>
+      worker.onmessage = (e) => {
+        worker.terminate();
+        // If the worker returns an error, the statement was FALSE (ZK cannot prove false claims).
         e.data.error ? reject(new Error(`${circuit}: ${e.data.error}`)) : resolve(e.data);
-      w.onerror = (e) => reject(new Error(e.message || 'worker error'));
-      w.postMessage({ circuit, inputs });
+      };
+      worker.onerror = (e) => { worker.terminate(); reject(new Error(e.message || 'worker error')); };
+      worker.postMessage({ circuit, inputs });
     });
   }
 
-  // Build the private + public inputs each circuit needs for this request.
+  // Assemble the private + public inputs each circuit needs.
+  // Every identity circuit shares the same base (idBase) which pins the proof to:
+  //   - the signed commitment (so you're proving about YOUR credential)
+  //   - rpId + nonce (so the proof is bound to THIS request — replay impossible)
   function buildInputs(rq) {
     const a = creds.identity.attrs;
     const idBase = {
@@ -107,10 +125,10 @@ export default function Wallet() {
     };
     const c = creds.credit?.attrs;
     return {
-      age_gte_18: { ...idBase, cutoffDate: String(rq.cutoff_date) },
-      citizenship_ng: idBase,
-      id_ownership: { ...idBase, amanaId: rq.amana_id },
-      bvn_match: { ...idBase, bvnHash: rq.bvn_hash },
+      age_gte_18:       { ...idBase, cutoffDate: String(rq.cutoff_date) },
+      citizenship_ng:   idBase,
+      id_ownership:     { ...idBase, amanaId: rq.amana_id },
+      // Credit circuit uses a separate commitment (bureau-issued), not the identity one.
       credit_score_gte: c && {
         score: c.score, activeLoans: c.activeLoans, defaults: c.defaults,
         secret: c.secret, salt: c.salt,
@@ -124,13 +142,17 @@ export default function Wallet() {
     setError(null);
     setResult(null);
     const inputsByCircuit = buildInputs(request);
+    setProving('all');
     try {
-      const proofs = {};
-      for (const claim of request.claims) {
-        setProving(claim);
-        const { proof, publicSignals } = await prove(claim, inputsByCircuit[claim]);
-        proofs[claim] = { proof, publicSignals };
-      }
+      // Run all required circuits simultaneously — one Worker thread each.
+      // On a 4-core device, 4 proofs take roughly the same time as 1 proof sequentially.
+      const proofResults = await Promise.all(
+        request.claims.map(claim => prove(claim, inputsByCircuit[claim]))
+      );
+      // Reshape array of results into { circuit: { proof, publicSignals } } for the gateway.
+      const proofs = Object.fromEntries(
+        proofResults.map(r => [r.circuit, { proof: r.proof, publicSignals: r.publicSignals }])
+      );
       setProving('submitting');
       const out = await fetch('/api/verify', {
         method: 'POST',
@@ -139,8 +161,8 @@ export default function Wallet() {
       }).then((r) => r.json());
       setResult(out);
     } catch (err) {
-      // Proving failed => a statement is false (e.g. the amanaId the
-      // company holds is not this wallet's). Deny so they get a clean "no".
+      // Proving failed — most likely a false statement (e.g. the company holds a different
+      // wallet's amanaId). ZK cannot prove false statements; the request is denied cleanly.
       setError(err.message);
       await fetch(`/api/requests/${request.id}/deny`, { method: 'POST' }).catch(() => {});
     } finally {
@@ -154,36 +176,9 @@ export default function Wallet() {
     setRequest(null);
   }
 
-  // Option 3: authorise the credit bureau to link this citizen's SwiftLoan
-  // and GTBank IDs. Without this proof the two IDs are mathematically
-  // unlinkable — this is the citizen's cryptographic permission slip.
-  async function authoriseLinkage() {
-    setLinkState('working');
-    try {
-      const { linkageId, nonce } = await fetch('/api/linkage/start', { method: 'POST' })
-        .then((r) => r.json());
-      const a = creds.identity.attrs;
-      const { proof, publicSignals } = await prove('id_linkage', {
-        nin: a.nin, bvn: a.bvn, dob: a.dob, state: a.state,
-        citizenship: a.citizenship, secret: a.secret, salt: a.salt,
-        commitment: creds.identity.commitment,
-        rpIdA: '1001', idA: amanaIds['1001'],
-        rpIdB: '2002', idB: amanaIds['2002'],
-        nonce,
-      });
-      const out = await fetch('/api/linkage/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ linkageId, proof, publicSignals }),
-      }).then((r) => r.json());
-      setLinkState(out.ok ? 'linked' : 'error');
-    } catch {
-      setLinkState('error');
-    }
-  }
-
   return (
     <>
+      {/* --- Credential display ------------------------------------------------ */}
       <div className="card">
         <h2>Your credentials</h2>
         {!creds ? (
@@ -192,14 +187,14 @@ export default function Wallet() {
           <>
             <p>
               <b>Identity</b> — issued to <b>{creds.identity.attrs.name}</b>, signed by
-              the National Registry. Contains (sealed, on this device): NIN, BVN,
-              date of birth, state, citizenship.
+              the National Registry via the NIMC Trust Bridge. Contains (sealed, on this device):
+              NIN, BVN, date of birth, state, citizenship.
             </p>
             <p className="mono">identity commitment: {creds.identity.commitment}</p>
             {creds.credit && (
               <>
                 <p>
-                  <b>Credit</b> — signed by CRC Credit Bureau. Contains (sealed):
+                  <b>Credit</b> — signed by the Credit Bureau. Contains (sealed):
                   credit score, active loans, defaults. Lenders only ever learn
                   &ldquo;score is above X: true/false&rdquo;.
                 </p>
@@ -210,13 +205,14 @@ export default function Wallet() {
         )}
       </div>
 
+      {/* --- AmanaId display --------------------------------------------------- */}
       <div className="card">
         <h2>Your amanaIds</h2>
         <p className="muted">
-          One ID per company, derived from your wallet secret. Give a company
-          its ID instead of your BVN/NIN — a stolen ID is useless, because only
-          this wallet can prove ownership of it. Note the two IDs differ: the
-          companies cannot combine records about you without your say-so.
+          One ID per company, mathematically bound to your wallet secret and that company only.
+          Give a company its ID instead of your BVN/NIN — a stolen ID is useless, because
+          only this wallet can generate the ownership proof. The two IDs are different on purpose:
+          companies cannot link records without your cryptographic permission.
         </p>
         {!amanaIds ? (
           <p className="muted">Deriving IDs…</p>
@@ -230,6 +226,7 @@ export default function Wallet() {
         )}
       </div>
 
+      {/* --- Consent request --------------------------------------------------- */}
       {request && !busy && (
         <div className="card">
           <h2>🔔 Consent request from {request.rp_name}</h2>
@@ -238,7 +235,8 @@ export default function Wallet() {
             {request.claims.map((c) => <li key={c}>{CLAIM_LABELS[c]}</li>)}
           </ul>
           <p className="muted">
-            Approving shares only true/false answers — no raw data leaves your wallet.
+            Approving generates cryptographic proofs for each claim — only true/false answers
+            leave your wallet. No raw data (NIN, BVN, score, birthday) is ever transmitted.
           </p>
           <div className="row">
             <button onClick={approve} disabled={!creds}>Approve &amp; generate proofs</button>
@@ -247,26 +245,30 @@ export default function Wallet() {
         </div>
       )}
 
+      {/* --- Proving in progress ----------------------------------------------- */}
       {busy && (
         <div className="card">
-          <h2><span className="spinner" />Generating proofs in Web Worker…</h2>
+          <h2><span className="spinner" />Generating proofs in Web Workers…</h2>
           <p>
             {proving === 'submitting'
               ? 'Submitting proofs to the gateway…'
-              : <>Proving <b>{proving}</b>…</>}
+              : `Proving ${request?.claims?.length ?? ''} claims in parallel…`}
           </p>
+          {/* ZKTerminal visualises the Poseidon hash formula and per-circuit progress */}
+          <ZKTerminal proving={proving} claims={request?.claims ?? []} />
           <p className="muted">
             Main thread is still alive — liveness counter: <b>{tick}</b> (it
-            would freeze if we proved on the UI thread).
+            would freeze if we proved on the UI thread instead of Web Workers).
           </p>
         </div>
       )}
 
+      {/* --- Outcome ----------------------------------------------------------- */}
       {result && (
         <div className="card">
           <h2>{result.ok ? '✅ Verified' : '❌ Not verified'}</h2>
           <p className="mono">receipt: {result.receiptId || '—'}</p>
-          <p className="muted">The company received only this boolean and receipt.</p>
+          <p className="muted">The company received only this boolean and receipt. Nothing else.</p>
         </div>
       )}
 
@@ -275,34 +277,12 @@ export default function Wallet() {
           <h2>❌ Could not generate proof</h2>
           <p className="muted">{error}</p>
           <p className="muted">
-            This usually means a requested statement is false (e.g. the amanaId
-            the company holds is not this wallet&rsquo;s) — ZK proofs of false
-            statements are impossible, so the request was denied.
+            This usually means a requested statement is false — for example, the amanaId
+            the company holds belongs to a different wallet. ZK proofs of false statements
+            are impossible, so the request was denied automatically.
           </p>
         </div>
       )}
-
-      <div className="card">
-        <h2>Link my IDs (credit history)</h2>
-        <p className="muted">
-          Your SwiftLoan and GTBank IDs are unlinkable by default. To let the
-          credit bureau build your credit history from both, you can authorise
-          the link — a one-time, logged, zero-knowledge permission slip.
-        </p>
-        <div className="row">
-          <button
-            onClick={authoriseLinkage}
-            disabled={!amanaIds || linkState === 'working' || linkState === 'linked'}
-          >
-            {linkState === 'linked' ? 'IDs linked ✓' : 'Authorise SwiftLoan ↔ GTBank link'}
-          </button>
-          {linkState === 'working' && <span className="muted"><span className="spinner" />proving…</span>}
-          {linkState === 'error' && <span className="muted">linkage failed — try again</span>}
-        </div>
-        {linkState === 'linked' && (
-          <p className="muted">Done — check the <a href="/dashboard">dashboard</a>: the link is on your audit log.</p>
-        )}
-      </div>
     </>
   );
 }

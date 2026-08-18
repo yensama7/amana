@@ -94,7 +94,7 @@ Two properties of this formula matter enormously:
 
 **If a stolen amanaId is useless, what stops someone from stealing it and passing it off as their own?** The `id_ownership` circuit. When the lender submits the amanaId to the gateway, the gateway demands a zero-knowledge proof that whoever is claiming this ID also knows the wallet secret that generated it. You cannot produce that proof without the secret. A thief with only the number is stuck.
 
-**Company numbers in this demo:** SwiftLoan = `1001`, GTBank = `2002`, Credit Bureau = `3003`. These are hardcoded in the demo code because we are simulating a registration system. In production, a company would register with the gateway operator (the Central Bank, NIMC, or whoever runs this infrastructure), get assigned a unique company number (like a CAC registration number), and use that number in all future verification requests. The gateway operator controls the directory; companies cannot pick their own numbers, for the same reason banks do not get to choose their own sort codes.
+**Company numbers in this demo:** Swift Loan = `1001`, ABC Loan = `2002`. ABC Loan requests only two proofs (age and citizenship — no credit check, no amanaId), demonstrating that ZK circuits are modular: each company requests exactly what it needs and nothing more. These IDs are hardcoded in the demo because we are simulating a registration system. In production, a company would register with the gateway operator (the Central Bank, NIMC, or whoever runs this infrastructure), get assigned a unique company number (like a CAC registration number), and use that number in all future verification requests. The gateway operator controls the directory; companies cannot pick their own numbers, for the same reason banks do not get to choose their own sort codes.
 
 ---
 
@@ -108,8 +108,6 @@ When a citizen approves a verification request, the wallet generates one **zero-
 | **Citizenship** | Citizenship code = 566 (Nigeria's international code) | Everything else |
 | **ID ownership** | `Poseidon(wallet_secret, company_number) = amanaId` | The wallet secret and NIN/BVN |
 | **Credit check** | Credit score ≥ the lender's minimum | The actual score |
-| **ID linkage** | Two amanaIds at different companies come from the same wallet secret | Everything except the fact of the link |
-| **BVN match** | (legacy path) The BVN on record hashes to the supplied value | The BVN itself |
 
 Every proof also carries two additional public values that the gateway checks:
 - **rpId** — binds the proof to this specific company. A valid proof for SwiftLoan cannot be reused at GTBank.
@@ -151,18 +149,15 @@ The citizen controls this data. It sits in their wallet. No query happens withou
 
 ---
 
-## ID linkage: the consent-based credit history bridge (Option 3)
+## ID linkage: the consent-based credit history bridge (design concept)
 
-Because every company sees a *different* amanaId, the credit bureau by default cannot tell that the same person has accounts at SwiftLoan and GTBank. This is good for privacy — companies cannot build a shadow profile by cross-referencing their data. But it creates a problem: the bureau cannot aggregate the citizen's full credit picture across institutions.
+Because every company sees a *different* amanaId, the credit bureau by default cannot tell that the same person has accounts at Swift Loan and ABC Loan. This is good for privacy — companies cannot build a shadow profile by cross-referencing their data. But it creates a problem: the bureau cannot aggregate the citizen's full credit picture across institutions.
 
-Option 3 solves this with a **consent-based linkage proof**. When the citizen clicks "Authorise SwiftLoan ↔ GTBank link":
-
-1. The wallet generates an `id_linkage` zero-knowledge proof. This proof says: "I know the wallet secret that produced both the SwiftLoan ID and the GTBank ID." It reveals nothing except the fact of the link.
-2. The gateway verifies the proof and records which two IDs belong to the same person.
-3. This event appears on the citizen's audit log as a visible, dated entry.
-4. The link is revocable — the citizen can instruct the gateway to stop honouring it.
+This can be solved with a **consent-based linkage proof**: when the citizen explicitly authorises a link, the wallet generates a zero-knowledge proof that says "I know the wallet secret that produced both IDs." It reveals nothing except the fact of the link. The gateway records which two IDs belong to the same person; the citizen controls the link and can revoke it.
 
 Without this explicit proof, the two IDs are mathematically impossible to connect. The bureau cannot link them on its own.
+
+> **Note:** The `id_linkage` circuit and the corresponding gateway endpoints are not compiled in the current demo build — they are described here as the intended design for a production deployment.
 
 ---
 

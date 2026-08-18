@@ -2,7 +2,7 @@
 #
 # build-circuits.sh — one-shot ZK artifact builder for Amana Gateway.
 #
-# For each circuit (age_gte_18, citizenship_ng, bvn_match) this script:
+# For each circuit (age_gte_18, citizenship_ng, id_ownership, credit_score_gte) this script:
 #   1. compiles the .circom source to R1CS + a witness-generator .wasm
 #   2. runs a LOCAL powers-of-tau ceremony (2^13 — our circuits are only
 #      a few hundred constraints each, so this is generous and fast)
@@ -22,7 +22,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build"
-CIRCUITS=(age_gte_18 citizenship_ng bvn_match id_ownership credit_score_gte id_linkage)
+CIRCUITS=(age_gte_18 citizenship_ng id_ownership credit_score_gte)
 
 mkdir -p "$BUILD" "$ROOT/web/public/zk" "$ROOT/api/zk"
 

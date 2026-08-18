@@ -62,18 +62,6 @@ CREATE TABLE IF NOT EXISTS revocations (
   created_at   TIMESTAMPTZ DEFAULT now()
 );
 
--- Citizen-authorised linkages between two of their pairwise IDs
--- (the "permission slips" that let a credit bureau join records).
-CREATE TABLE IF NOT EXISTS linkages (
-  id           SERIAL PRIMARY KEY,
-  nonce        TEXT NOT NULL,         -- one-time value for the linkage proof
-  status       TEXT NOT NULL DEFAULT 'pending',  -- pending | linked
-  rp_a         TEXT,                  -- first company
-  id_a         TEXT,                  -- citizen's amanaId there
-  rp_b         TEXT,                  -- second company
-  id_b         TEXT,                  -- citizen's amanaId there
-  created_at   TIMESTAMPTZ DEFAULT now()
-);
 `;
 
 // Postgres may still be starting when the API boots (docker compose),

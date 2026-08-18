@@ -3,9 +3,8 @@
 // It plays every role from Node:
 //   company — derives nothing, just holds the citizen's amanaId + asks
 //             for age / citizenship / ID ownership / credit score ≥ 650
-//   wallet  — generates all four Groth16 proofs, then a linkage proof
-//   asserts — valid proofs -> true, replayed proofs -> rejected,
-//             linkage proof -> accepted
+//   wallet  — generates all four Groth16 proofs in parallel
+//   asserts — valid proofs -> true, replayed proofs -> rejected
 //
 // Prereqs:
 //   1. ZK artifacts built:  bash scripts/build-circuits.sh
@@ -77,11 +76,10 @@ const prove = (circuit, inputs) =>
     },
   };
 
-  const proofs = {};
-  for (const claim of rq.claims) {
-    proofs[claim] = await prove(claim, inputs[claim]);
-    console.log(`proved ${claim}`);
-  }
+  // Prove all claims in parallel — matches the browser wallet's Promise.all approach.
+  const results = await Promise.all(rq.claims.map(claim => prove(claim, inputs[claim])));
+  const proofs = Object.fromEntries(results.map((r, i) => [rq.claims[i], r]));
+  rq.claims.forEach(c => console.log(`proved ${c}`));
 
   // -- gateway verdicts -----------------------------------------------------
   const out = await post('/api/verify', { requestId, proofs });
@@ -91,21 +89,7 @@ const prove = (circuit, inputs) =>
   const replay = await post('/api/verify', { requestId, proofs });
   assert.notStrictEqual(replay.ok, true, 'replayed proofs must be rejected');
 
-  // -- linkage (Option 3): authorise linking SwiftLoan ↔ GTBank IDs ---------
-  const { linkageId, nonce } = await post('/api/linkage/start', {});
-  const linkProof = await prove('id_linkage', {
-    nin: a.nin, bvn: a.bvn, dob: a.dob, state: a.state,
-    citizenship: a.citizenship, secret: a.secret, salt: a.salt,
-    commitment: identity.commitment,
-    rpIdA: '1001', idA: pos([a.secret, '1001']),
-    rpIdB: '2002', idB: pos([a.secret, '2002']),
-    nonce,
-  });
-  console.log('proved id_linkage');
-  const linked = await post('/api/linkage/complete', { linkageId, ...linkProof });
-  assert.strictEqual(linked.ok, true, 'linkage proof must be accepted');
-
-  console.log(`SMOKE OK — verified=true, replay rejected, linkage accepted, receipt=${out.receiptId}`);
+  console.log(`SMOKE OK — verified=true, replay rejected, receipt=${out.receiptId}`);
   process.exit(0); // snarkjs keeps worker threads alive; exit explicitly
 })().catch((err) => {
   console.error('SMOKE FAILED:', err.message);
