@@ -43,6 +43,7 @@ export default function Wallet() {
   const [tick, setTick] = useState(0);            // main-thread liveness counter (increments 10x/sec)
   const [copied, setCopied] = useState(null);     // companyId whose amanaId was just copied
   const [warmed, setWarmed] = useState(false);    // proving artifacts preloaded into Cache API
+  const [loadError, setLoadError] = useState(null); // credential/poseidon load failed — show retry, not an eternal spinner
   const poseidonRef = useRef(null);
   const busy = proving !== null;
 
@@ -72,7 +73,11 @@ export default function Wallet() {
           ids[co.id] = poseidon.F.toString(poseidon([BigInt(c.identity.attrs.secret), BigInt(co.id)]));
         }
         setAmanaIds(ids);
-      } catch { /* gateway not up yet — user can refresh */ }
+      } catch (err) {
+        // Gateway down, or a stale cached JS chunk failed to import — either
+        // way, tell the user instead of spinning forever.
+        setLoadError(String(err?.message || err));
+      }
     })();
   }, []);
 
@@ -83,11 +88,15 @@ export default function Wallet() {
     if (typeof caches === 'undefined') return;
     (async () => {
       try {
-        const cache = await caches.open('zk-v1');
+        const cache = await caches.open('zk-v2'); // version must match sw.js KEEP list
         for (const circuit of Object.keys(CLAIM_LABELS)) {
           for (const ext of ['wasm', 'zkey']) {
             const url = `/zk/${circuit}.${ext}`;
-            if (!(await cache.match(url))) await cache.put(url, await fetch(url));
+            if (!(await cache.match(url))) {
+              const res = await fetch(url);
+              // Never cache an error response as a proving artifact.
+              if (res.ok) await cache.put(url, res);
+            }
           }
         }
         setWarmed(true);
@@ -225,10 +234,27 @@ export default function Wallet() {
           </span>
         </div>
 
+        {loadError && (
+          <div className="card">
+            <div className="row">
+              <span className="fail-pop">✕</span>
+              <h2 style={{ margin: 0 }}>Wallet could not load</h2>
+            </div>
+            <p className="muted" style={{ marginTop: 12 }}>{loadError}</p>
+            <p className="muted">
+              Usually the gateway is still starting, or a stale cached version of the
+              app is interfering. Reloading fetches everything fresh.
+            </p>
+            <button onClick={() => location.reload()}>Reload wallet</button>
+          </div>
+        )}
+
         {/* --- Credential display ------------------------------------------------ */}
         <div className="card">
           <h2>Your credentials</h2>
-          {!creds ? (
+          {loadError ? (
+            <p className="muted">Unavailable until the wallet reloads.</p>
+          ) : !creds ? (
             <p className="muted"><span className="spinner" />Loading credentials from the gateway…</p>
           ) : (
             <>
@@ -275,7 +301,9 @@ export default function Wallet() {
             only this wallet can generate the ownership proof. The two IDs are different on purpose:
             companies cannot link records without your cryptographic permission.
           </p>
-          {!amanaIds ? (
+          {loadError ? (
+            <p className="muted">Unavailable until the wallet reloads.</p>
+          ) : !amanaIds ? (
             <p className="muted"><span className="spinner" />Deriving IDs with Poseidon…</p>
           ) : (
             COMPANIES.map((co) => (

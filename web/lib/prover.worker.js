@@ -19,12 +19,15 @@ import * as snarkjs from 'snarkjs';
 // On a cache miss the file is fetched from the network and stored for next time.
 // Returns a Uint8Array that snarkjs accepts in place of a URL string.
 async function cachedBuf(url) {
-  const cache = await caches.open('zk-v1');
+  const cache = await caches.open('zk-v2'); // version must match sw.js KEEP list
   let response = await cache.match(url);
   if (!response) {
     // First load: download and cache. Clone before consuming — you can only
     // read a Response body once, and cache.put needs a copy.
     response = await fetch(url);
+    // Never cache an error page as a .wasm/.zkey — snarkjs would choke on it
+    // forever after. Fail loudly instead; the wallet surfaces the error.
+    if (!response.ok) throw new Error(`failed to fetch ${url}: HTTP ${response.status}`);
     await cache.put(url, response.clone());
     response = await cache.match(url); // read the cached copy
   }

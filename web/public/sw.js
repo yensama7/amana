@@ -1,7 +1,20 @@
 // Amana Way — PWA service worker.
-// Cache-first for static assets (JS, CSS, ZK artifacts, icons).
-// Network-first for /api/* — the app needs live data, stale responses break the demo.
-const CACHE = 'amana-v1';
+//
+// Strategy (learned the hard way — cache-first HTML across a redeploy serves
+// stale pages that reference deleted JS chunks and crashes the app):
+//   /api/*          — never touched: the app needs live data.
+//   /zk/*           — never touched: the prover worker manages these in its
+//                     own versioned cache (ZK_CACHE below); caching them twice
+//                     doubles ~19MB and can go stale independently.
+//   /_next/static/* — cache-first: content-hashed, immutable forever.
+//   everything else — network-first, cache fallback: always fresh after a
+//                     deploy, still works offline.
+//
+// Bump BOTH names on any deploy that changes cached content — activate()
+// deletes every cache not in KEEP, which purges stale proving keys too.
+const CACHE = 'amana-v2';
+const ZK_CACHE = 'zk-v2'; // owned by prover.worker.js / wallet warm-up
+const KEEP = [CACHE, ZK_CACHE];
 
 self.addEventListener('install', (e) => {
   // Activate immediately without waiting for existing tabs to close.
@@ -9,29 +22,45 @@ self.addEventListener('install', (e) => {
 });
 
 self.addEventListener('activate', (e) => {
-  // Clean up any caches from previous versions on activation.
+  // Purge every cache from previous versions (including old zk key caches).
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys.filter(k => !KEEP.includes(k)).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
-self.addEventListener('fetch', (e) => {
-  // Always hit the network for API calls — stale consent/audit data would confuse the demo.
-  if (e.request.url.includes('/api/')) return;
+function cacheOk(res) {
+  return res && res.status === 200 && res.type !== 'opaque';
+}
 
-  // Cache-first for everything else: check cache, fall through to network and store.
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/zk/')) return;
+
+  // Immutable hashed assets: cache-first.
+  if (url.pathname.startsWith('/_next/static/')) {
+    e.respondWith(
+      caches.match(e.request).then(cached => cached || fetch(e.request).then(res => {
+        if (cacheOk(res)) {
+          const clone = res.clone();
+          caches.open(CACHE).then(c => c.put(e.request, clone));
+        }
+        return res;
+      }))
+    );
+    return;
+  }
+
+  // Pages, manifest, icons: network-first so a redeploy is picked up
+  // immediately; fall back to the last good copy when offline.
   e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(res => {
-        // Only cache successful responses — don't cache errors or opaque responses.
-        if (!res || res.status !== 200 || res.type === 'opaque') return res;
+    fetch(e.request).then(res => {
+      if (cacheOk(res)) {
         const clone = res.clone();
         caches.open(CACHE).then(c => c.put(e.request, clone));
-        return res;
-      });
-    })
+      }
+      return res;
+    }).catch(() => caches.match(e.request))
   );
 });
