@@ -6,11 +6,12 @@ import { useEffect, useState } from 'react';
 const CLAIM_SHORT = {
   age_gte_18: 'age ≥ 18',
   citizenship_ng: 'citizenship = NG',
-  bvn_match: 'BVN match',
   id_ownership: 'ID ownership',
   credit_score_gte: 'credit check',
-  id_linkage: 'ID linkage',
 };
+
+// Deterministic avatar colour per relying party.
+const AVATAR_COLORS = ['#2563eb', '#d97706', '#7c3aed', '#0d9488'];
 
 export default function Dashboard() {
   const [audit, setAudit] = useState([]);
@@ -48,53 +49,83 @@ export default function Dashboard() {
   // Distinct relying parties seen in the audit log → revocation controls.
   const parties = [...new Map(audit.map((e) => [e.rp_id, e.rp_name])).entries()];
 
-  return (
-    <>
-      <div className="card">
-        <h2>Relying parties</h2>
-        {parties.length === 0 && <p className="muted">No relying party has asked for anything yet.</p>}
-        {parties.map(([rpId, rpName]) => (
-          <div className="row" key={rpId} style={{ marginBottom: 8 }}>
-            <span style={{ minWidth: 160 }}><b>{rpName}</b> <span className="muted">(id {rpId})</span></span>
-            {isRevoked(rpId) ? (
-              <>
-                <span className="badge blocked">revoked</span>
-                <button className="ghost" onClick={() => setRevocation(rpId, rpName, false)}>Restore access</button>
-              </>
-            ) : (
-              <button className="danger" onClick={() => setRevocation(rpId, rpName, true)}>Revoke access</button>
-            )}
-          </div>
-        ))}
-        <p className="muted">
-          Revoking blocks all future verification requests from that party — the
-          gateway refuses them before a proof is ever requested.
-        </p>
-      </div>
+  const count = (outcome) => audit.filter((e) => e.outcome === outcome).length;
 
-      <div className="card">
-        <h2>Audit log</h2>
-        {audit.length === 0 ? (
-          <p className="muted">No verification events yet.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr><th>When</th><th>Who asked</th><th>What they asked</th><th>Outcome</th><th>Receipt</th></tr>
-            </thead>
-            <tbody>
-              {audit.map((e) => (
-                <tr key={e.id}>
-                  <td className="muted">{new Date(e.created_at).toLocaleTimeString()}</td>
-                  <td>{e.rp_name}</td>
-                  <td>{e.claims.map((c) => CLAIM_SHORT[c] || c).join(', ')}</td>
-                  <td><span className={`badge ${e.outcome}`}>{e.outcome}</span></td>
-                  <td className="mono">{e.receipt_id ? e.receipt_id.slice(0, 8) + '…' : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+  return (
+    <div className="amana-bg">
+      <div className="main">
+        <div className="row" style={{ marginBottom: 20 }}>
+          <h1 style={{ margin: 0, fontSize: 24 }}>🛡 Consent Dashboard</h1>
+          <span className="badge neutral">your data, your rules</span>
+          <span className="spacer" />
+          <span className="muted"><span className="live-dot" />live</span>
+        </div>
+
+        <div className="stat-cards">
+          <div className="stat-card"><b>{audit.length}</b><span>total requests</span></div>
+          <div className="stat-card ok"><b>{count('verified')}</b><span>verified</span></div>
+          <div className="stat-card warn"><b>{count('denied')}</b><span>denied by you</span></div>
+          <div className="stat-card bad"><b>{count('blocked') + count('failed')}</b><span>blocked / failed</span></div>
+        </div>
+
+        <div className="card">
+          <h2>Relying parties</h2>
+          {parties.length === 0 && (
+            <p className="muted">No relying party has asked for anything yet. Try applying at a lender.</p>
+          )}
+          {parties.map(([rpId, rpName], i) => (
+            <div className="party-row" key={rpId}>
+              <span className="avatar" style={{ background: AVATAR_COLORS[i % AVATAR_COLORS.length] }}>
+                {rpName?.[0] ?? '?'}
+              </span>
+              <span style={{ minWidth: 140 }}>
+                <b>{rpName}</b>
+                <span className="muted" style={{ display: 'block' }}>company id {rpId}</span>
+              </span>
+              <span className="spacer" />
+              {isRevoked(rpId) ? (
+                <>
+                  <span className="badge blocked">access revoked</span>
+                  <button className="ghost" onClick={() => setRevocation(rpId, rpName, false)}>Restore access</button>
+                </>
+              ) : (
+                <>
+                  <span className="badge verified">access active</span>
+                  <button className="danger" onClick={() => setRevocation(rpId, rpName, true)}>Revoke access</button>
+                </>
+              )}
+            </div>
+          ))}
+          <p className="muted">
+            Revoking blocks all future verification requests from that party — the
+            gateway refuses them before a proof is ever requested.
+          </p>
+        </div>
+
+        <div className="card">
+          <h2>Audit log</h2>
+          {audit.length === 0 ? (
+            <p className="muted">No verification events yet.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr><th>When</th><th>Who asked</th><th>What they asked</th><th>Outcome</th><th>Receipt</th></tr>
+              </thead>
+              <tbody>
+                {audit.map((e) => (
+                  <tr key={e.id}>
+                    <td className="muted">{new Date(e.created_at).toLocaleTimeString()}</td>
+                    <td><b>{e.rp_name}</b></td>
+                    <td className="muted">{e.claims.map((c) => CLAIM_SHORT[c] || c).join(' · ')}</td>
+                    <td><span className={`badge ${e.outcome}`}>{e.outcome}</span></td>
+                    <td className="mono">{e.receipt_id ? e.receipt_id.slice(0, 8) + '…' : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
-    </>
+    </div>
   );
 }

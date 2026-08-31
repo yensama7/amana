@@ -4,8 +4,8 @@
   "description": "Zero-knowledge identity wallet — prove facts, not data.",
   "start_url": "/wallet",
   "display": "standalone",
-  "background_color": "#0e1a13",
-  "theme_color": "#0e1a13",
+  "background_color": "#070d0a",
+  "theme_color": "#070d0a",
   "icons": [
     {
       "src": "/icon.svg",

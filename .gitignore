@@ -5,3 +5,4 @@ build/
 web/public/zk/
 api/zk/
 .env
+package-lock.json

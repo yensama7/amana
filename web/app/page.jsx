@@ -1,36 +1,93 @@
-// Landing page: explains the demo and where each actor lives.
+// Landing page: what the system is, who the actors are, and the exact demo script.
 export default function Home() {
   return (
-    <>
-      <div className="card">
-        <h2>Prove facts, not data.</h2>
-        <p>
-          Amana Gateway lets a citizen prove statements about themselves —
-          &ldquo;I am over 18&rdquo;, &ldquo;I am Nigerian&rdquo;, &ldquo;this
-          ID is mine&rdquo;, &ldquo;my credit score is high enough&rdquo; —
-          using zero-knowledge proofs, without ever handing over the underlying
-          data. No BVN or NIN is typed anywhere: companies get an
-          <b> amanaId</b> instead, an opaque code that identifies you but is
-          useless to a thief.
-        </p>
-        <p className="muted">The demo has three actors, each with its own page (nav above):</p>
-        <ul className="claims">
-          <li><b>SwiftLoan</b> — a mock lender that needs four facts verified before approving a loan.</li>
-          <li><b>Citizen Wallet</b> — holds two signed credentials (identity + credit), shows your amanaIds, and generates proofs in a Web Worker.</li>
-          <li><b>Consent Dashboard</b> — the citizen&rsquo;s audit trail, with revoke buttons per company.</li>
-        </ul>
+    <div className="amana-bg">
+      <div className="main-wide">
+        <div className="hero">
+          <span className="eyebrow">● Zero-Knowledge Identity for Nigeria</span>
+          <h1>
+            Prove facts, <span className="gradient-text">not data.</span>
+          </h1>
+          <p className="sub">
+            Amana Gateway lets a citizen prove statements about themselves —
+            over 18, Nigerian, this ID is mine, credit score high enough —
+            using zero-knowledge proofs. No BVN. No NIN. No documents.
+            Companies get a cryptographic <b>true/false</b>, and nothing else.
+          </p>
+          <div className="stats">
+            <div className="stat"><b>4</b><span>ZK circuits (Groth16)</span></div>
+            <div className="stat"><b>0</b><span>identity numbers shared</span></div>
+            <div className="stat"><b>~280</b><span>constraints per proof</span></div>
+            <div className="stat"><b>100%</b><span>proved on-device</span></div>
+          </div>
+        </div>
+
+        <div className="card">
+          <h2>How a verification flows</h2>
+          <div className="flow">
+            <div className="node"><b>💸 Lender</b><span>asks: &ldquo;is this person over 18?&rdquo;</span></div>
+            <div className="arrow">→</div>
+            <div className="node"><b>🔐 Gateway</b><span>creates a one-time consent request</span></div>
+            <div className="arrow">→</div>
+            <div className="node"><b>📱 Citizen Wallet</b><span>approves; proves it in-browser (Web Workers)</span></div>
+            <div className="arrow">→</div>
+            <div className="node"><b>✅ Verdict</b><span>lender receives true/false + receipt</span></div>
+          </div>
+          <p className="muted">
+            Every proof is bound to a signed government credential, the requesting company,
+            and a single-use nonce — replays and forgeries are cryptographically impossible.
+          </p>
+        </div>
+
+        <div className="grid-2">
+          <div className="card">
+            <h2>📱 Citizen Wallet</h2>
+            <p>
+              Holds two signed credentials (identity + credit), derives a different
+              opaque <b>amanaId</b> per company, and generates all proofs locally
+              in parallel Web Workers.
+            </p>
+            <a className="btn" href="/wallet">Open the wallet</a>
+          </div>
+          <div className="card">
+            <h2>🛡 Consent Dashboard</h2>
+            <p>
+              The citizen&rsquo;s audit trail: who asked, what they asked, and the
+              outcome — with one-click revocation per company.
+            </p>
+            <a className="btn" href="/dashboard">Open the dashboard</a>
+          </div>
+          <div className="card">
+            <h2>💸 Swift Loan</h2>
+            <p>
+              A full-KYC lender: four proofs — age, citizenship, ID ownership,
+              and credit score ≥ 600. Never sees a single identity number.
+            </p>
+            <a className="btn" href="/swift-loan">Visit Swift Loan</a>
+          </div>
+          <div className="card">
+            <h2>🏦 ABC Loan</h2>
+            <p>
+              A light-touch lender: just two proofs — age and citizenship.
+              Shows that ZK circuits are modular: ask less, learn less.
+            </p>
+            <a className="btn" href="/abc-loan">Visit ABC Loan</a>
+          </div>
+        </div>
+
+        <div className="card elevated">
+          <h2>🎬 The 3-minute demo script</h2>
+          <ol className="steps">
+            <li>Open the <a href="/wallet">Citizen Wallet</a> — see your credentials and copy your <b>Swift Loan amanaId</b>.</li>
+            <li>Visit <a href="/swift-loan">Swift Loan</a>, paste the ID, apply — notice there is no BVN/NIN field anywhere.</li>
+            <li>Back in the wallet, a consent request appears: approve it and watch <b>four proofs generate in parallel</b> while the UI stays live.</li>
+            <li>Swift Loan gets <b>verified ✓</b> and a receipt — nothing else crosses the wire.</li>
+            <li>Try <a href="/abc-loan">ABC Loan</a>: it asks for only two proofs — the wallet generates exactly those two circuits, no more.</li>
+            <li>Paste the <i>wrong</i> company&rsquo;s amanaId into Swift Loan — proving ownership fails, because ZK cannot prove a false statement.</li>
+            <li>On the <a href="/dashboard">Dashboard</a>, revoke Swift Loan and apply again — blocked at the gateway, live, and logged.</li>
+          </ol>
+        </div>
       </div>
-      <div className="card">
-        <h2>Try the demo flow</h2>
-        <ol className="claims">
-          <li>Open the <a href="/wallet">Wallet</a> and copy your <b>SwiftLoan amanaId</b>.</li>
-          <li>Open <a href="/loan">SwiftLoan</a>, paste the ID, and apply — notice there is no BVN/NIN field.</li>
-          <li>Back in the Wallet, a consent request appears. Approve it and watch four proofs generate (the UI stays responsive).</li>
-          <li>SwiftLoan gets <b>verified: true</b> + a receipt — and nothing else.</li>
-          <li>In the Wallet, click <b>Authorise SwiftLoan ↔ GTBank link</b> — consent-based ID linkage, logged on the dashboard.</li>
-          <li>On the <a href="/dashboard">Dashboard</a>, revoke SwiftLoan, then apply again — blocked, live.</li>
-        </ol>
-      </div>
-    </>
+    </div>
   );
 }

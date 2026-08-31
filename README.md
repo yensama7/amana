@@ -52,7 +52,7 @@ The trace is a dry run — it does not write to the database or affect the live 
 
 **The BVN problem.** Your BVN does two jobs at once: it *points* to your records, and knowing it is treated as *proof it's yours*. That second job is why leaked BVNs are dangerous. Amana splits the jobs: the amanaId only points; ZK proofs do all the proving. Numbers stop being secrets worth stealing.
 
-**One ID per company.** Your SwiftLoan ID and your GTBank ID are different, and no one can tell they belong to the same person. Companies can't quietly merge their files about you. When merging is *useful to you* (building your credit history), you grant it explicitly — one click, one proof, one audit line, one revocable decision.
+**One ID per company.** Your Swift Loan ID and your ABC Loan ID are different, and no one can tell they belong to the same person. Companies can't quietly merge their files about you. When merging is *useful to you* (building your credit history), you grant it explicitly — one click, one proof, one audit line, one revocable decision.
 
 **Your history lives with you.** The credit bureau doesn't get queried behind your back. It issues your wallet a sealed credit credential, and lenders ask *your wallet* — which answers only "score ≥ 650: true" and keeps the rest private.
 

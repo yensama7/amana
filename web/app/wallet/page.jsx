@@ -37,9 +37,12 @@ export default function Wallet() {
   const [amanaIds, setAmanaIds] = useState(null); // { [companyId]: derived BigInt string }
   const [request, setRequest] = useState(null);   // pending consent request from a company
   const [proving, setProving] = useState(null);   // 'all' | 'submitting' | null
+  const [claimDone, setClaimDone] = useState({}); // { [circuit]: true } as each proof lands
   const [result, setResult] = useState(null);     // last gateway verdict { ok, receiptId }
   const [error, setError] = useState(null);
   const [tick, setTick] = useState(0);            // main-thread liveness counter (increments 10x/sec)
+  const [copied, setCopied] = useState(null);     // companyId whose amanaId was just copied
+  const [warmed, setWarmed] = useState(false);    // proving artifacts preloaded into Cache API
   const poseidonRef = useRef(null);
   const busy = proving !== null;
 
@@ -70,6 +73,25 @@ export default function Wallet() {
         }
         setAmanaIds(ids);
       } catch { /* gateway not up yet — user can refresh */ }
+    })();
+  }, []);
+
+  // Warm the proof-artifact cache in the background: pull every .wasm/.zkey into
+  // the same 'zk-v1' Cache API bucket the prover worker reads from, so the FIRST
+  // approval of the demo proves at full speed instead of stalling on ~10MB of downloads.
+  useEffect(() => {
+    if (typeof caches === 'undefined') return;
+    (async () => {
+      try {
+        const cache = await caches.open('zk-v1');
+        for (const circuit of Object.keys(CLAIM_LABELS)) {
+          for (const ext of ['wasm', 'zkey']) {
+            const url = `/zk/${circuit}.${ext}`;
+            if (!(await cache.match(url))) await cache.put(url, await fetch(url));
+          }
+        }
+        setWarmed(true);
+      } catch { /* cache unavailable — worker will fetch on demand */ }
     })();
   }, []);
 
@@ -141,13 +163,20 @@ export default function Wallet() {
   async function approve() {
     setError(null);
     setResult(null);
+    setClaimDone({});
     const inputsByCircuit = buildInputs(request);
     setProving('all');
     try {
       // Run all required circuits simultaneously — one Worker thread each.
       // On a 4-core device, 4 proofs take roughly the same time as 1 proof sequentially.
+      // Each promise also flips its claim's ✓ in the ZK terminal as it lands.
       const proofResults = await Promise.all(
-        request.claims.map(claim => prove(claim, inputsByCircuit[claim]))
+        request.claims.map(claim =>
+          prove(claim, inputsByCircuit[claim]).then((r) => {
+            setClaimDone((d) => ({ ...d, [claim]: true }));
+            return r;
+          })
+        )
       );
       // Reshape array of results into { circuit: { proof, publicSignals } } for the gateway.
       const proofs = Object.fromEntries(
@@ -176,113 +205,163 @@ export default function Wallet() {
     setRequest(null);
   }
 
+  function copyId(coId) {
+    navigator.clipboard.writeText(amanaIds[coId]).then(() => {
+      setCopied(coId);
+      setTimeout(() => setCopied(null), 1500);
+    });
+  }
+
   return (
-    <>
-      {/* --- Credential display ------------------------------------------------ */}
-      <div className="card">
-        <h2>Your credentials</h2>
-        {!creds ? (
-          <p className="muted">Loading credentials…</p>
-        ) : (
-          <>
-            <p>
-              <b>Identity</b> — issued to <b>{creds.identity.attrs.name}</b>, signed by
-              the National Registry via the NIMC Trust Bridge. Contains (sealed, on this device):
-              NIN, BVN, date of birth, state, citizenship.
-            </p>
-            <p className="mono">identity commitment: {creds.identity.commitment}</p>
-            {creds.credit && (
-              <>
-                <p>
-                  <b>Credit</b> — signed by the Credit Bureau. Contains (sealed):
-                  credit score, active loans, defaults. Lenders only ever learn
-                  &ldquo;score is above X: true/false&rdquo;.
-                </p>
-                <p className="mono">credit commitment: {creds.credit.commitment}</p>
-              </>
-            )}
-          </>
-        )}
-      </div>
+    <div className="amana-bg">
+      <div className="main">
+        <div className="row" style={{ marginBottom: 20 }}>
+          <h1 style={{ margin: 0, fontSize: 24 }}>📱 Amana Way</h1>
+          <span className="badge neutral">your identity wallet</span>
+          <span className="spacer" />
+          <span className="muted">
+            <span className="live-dot" />
+            {warmed ? 'proving keys cached · ready' : 'preloading proving keys…'}
+          </span>
+        </div>
 
-      {/* --- AmanaId display --------------------------------------------------- */}
-      <div className="card">
-        <h2>Your amanaIds</h2>
-        <p className="muted">
-          One ID per company, mathematically bound to your wallet secret and that company only.
-          Give a company its ID instead of your BVN/NIN — a stolen ID is useless, because
-          only this wallet can generate the ownership proof. The two IDs are different on purpose:
-          companies cannot link records without your cryptographic permission.
-        </p>
-        {!amanaIds ? (
-          <p className="muted">Deriving IDs…</p>
-        ) : (
-          COMPANIES.map((co) => (
-            <p key={co.id}>
-              <b>{co.name}:</b>{' '}
-              <span className="mono">{amanaIds[co.id]}</span>
-            </p>
-          ))
-        )}
-      </div>
-
-      {/* --- Consent request --------------------------------------------------- */}
-      {request && !busy && (
+        {/* --- Credential display ------------------------------------------------ */}
         <div className="card">
-          <h2>🔔 Consent request from {request.rp_name}</h2>
-          <p><b>{request.rp_name}</b> asks you to prove, in zero knowledge:</p>
-          <ul className="claims">
-            {request.claims.map((c) => <li key={c}>{CLAIM_LABELS[c]}</li>)}
-          </ul>
+          <h2>Your credentials</h2>
+          {!creds ? (
+            <p className="muted"><span className="spinner" />Loading credentials from the gateway…</p>
+          ) : (
+            <>
+              <div className="cred-card">
+                <div className="cred-top">
+                  <span>National Identity Credential</span>
+                  <span className="sealed-chip">🔏 Sealed on device</span>
+                </div>
+                <div className="holder">{creds.identity.attrs.name}</div>
+                <div className="fields">
+                  Contains (never transmitted): NIN · BVN · date of birth · state · citizenship
+                </div>
+                <div className="chipline">commitment {creds.identity.commitment}</div>
+                <div className="fields" style={{ marginTop: 6 }}>
+                  ✒️ Signed by the National Registry via the NIMC Trust Bridge
+                </div>
+              </div>
+              {creds.credit && (
+                <div className="cred-card credit">
+                  <div className="cred-top">
+                    <span>Credit Credential</span>
+                    <span className="sealed-chip">🔏 Sealed on device</span>
+                  </div>
+                  <div className="holder">{creds.identity.attrs.name}</div>
+                  <div className="fields">
+                    Contains (never transmitted): credit score · active loans · defaults
+                  </div>
+                  <div className="chipline">commitment {creds.credit.commitment}</div>
+                  <div className="fields" style={{ marginTop: 6 }}>
+                    ✒️ Signed by the Credit Bureau — lenders only ever learn &ldquo;score ≥ X: true/false&rdquo;
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* --- AmanaId display --------------------------------------------------- */}
+        <div className="card">
+          <h2>Your amanaIds</h2>
           <p className="muted">
-            Approving generates cryptographic proofs for each claim — only true/false answers
-            leave your wallet. No raw data (NIN, BVN, score, birthday) is ever transmitted.
+            One ID per company, mathematically bound to your wallet secret and that company only.
+            Give a company its ID instead of your BVN/NIN — a stolen ID is useless, because
+            only this wallet can generate the ownership proof. The two IDs are different on purpose:
+            companies cannot link records without your cryptographic permission.
           </p>
-          <div className="row">
-            <button onClick={approve} disabled={!creds}>Approve &amp; generate proofs</button>
-            <button className="ghost" onClick={deny}>Deny</button>
+          {!amanaIds ? (
+            <p className="muted"><span className="spinner" />Deriving IDs with Poseidon…</p>
+          ) : (
+            COMPANIES.map((co) => (
+              <div className="amana-row" key={co.id}>
+                <span className="co">{co.name}</span>
+                <span className="id">{amanaIds[co.id]}</span>
+                <button
+                  className={`copy-btn ${copied === co.id ? 'copied' : ''}`}
+                  onClick={() => copyId(co.id)}
+                >
+                  {copied === co.id ? '✓ Copied' : 'Copy'}
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* --- Consent request --------------------------------------------------- */}
+        {request && !busy && (
+          <div className="card elevated">
+            <h2>🔔 Consent request from {request.rp_name}</h2>
+            <p><b>{request.rp_name}</b> asks you to prove, in zero knowledge:</p>
+            <ul className="claim-list">
+              {request.claims.map((c) => (
+                <li key={c}>
+                  <span className="ico">🔐</span>
+                  {CLAIM_LABELS[c]}
+                </li>
+              ))}
+            </ul>
+            <p className="muted">
+              Approving generates a cryptographic proof for each claim — only true/false answers
+              leave your wallet. No raw data (NIN, BVN, score, birthday) is ever transmitted.
+            </p>
+            <div className="row">
+              <button onClick={approve} disabled={!creds}>Approve &amp; generate proofs</button>
+              <button className="ghost" onClick={deny}>Deny</button>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* --- Proving in progress ----------------------------------------------- */}
-      {busy && (
-        <div className="card">
-          <h2><span className="spinner" />Generating proofs in Web Workers…</h2>
-          <p>
-            {proving === 'submitting'
-              ? 'Submitting proofs to the gateway…'
-              : `Proving ${request?.claims?.length ?? ''} claims in parallel…`}
-          </p>
-          {/* ZKTerminal visualises the Poseidon hash formula and per-circuit progress */}
-          <ZKTerminal proving={proving} claims={request?.claims ?? []} />
-          <p className="muted">
-            Main thread is still alive — liveness counter: <b>{tick}</b> (it
-            would freeze if we proved on the UI thread instead of Web Workers).
-          </p>
-        </div>
-      )}
+        {/* --- Proving in progress ----------------------------------------------- */}
+        {busy && (
+          <div className="card elevated">
+            <h2><span className="spinner" />Generating proofs in Web Workers…</h2>
+            <p>
+              {proving === 'submitting'
+                ? 'All proofs generated — submitting to the gateway for Groth16 verification…'
+                : `Proving ${request?.claims?.length ?? ''} claims in parallel, one CPU thread each…`}
+            </p>
+            {/* ZKTerminal visualises the Poseidon hash formula and per-circuit progress */}
+            <ZKTerminal proving={proving} claims={request?.claims ?? []} claimDone={claimDone} />
+            <p className="muted">
+              Main thread is still alive — liveness counter: <b>{tick}</b> (it
+              would freeze if we proved on the UI thread instead of Web Workers).
+            </p>
+          </div>
+        )}
 
-      {/* --- Outcome ----------------------------------------------------------- */}
-      {result && (
-        <div className="card">
-          <h2>{result.ok ? '✅ Verified' : '❌ Not verified'}</h2>
-          <p className="mono">receipt: {result.receiptId || '—'}</p>
-          <p className="muted">The company received only this boolean and receipt. Nothing else.</p>
-        </div>
-      )}
+        {/* --- Outcome ----------------------------------------------------------- */}
+        {result && (
+          <div className="card elevated">
+            <div className="row">
+              <span className={result.ok ? 'success-pop' : 'fail-pop'}>{result.ok ? '✓' : '✕'}</span>
+              <h2 style={{ margin: 0 }}>{result.ok ? 'Verified' : 'Not verified'}</h2>
+            </div>
+            <p className="mono" style={{ marginTop: 12 }}>receipt: {result.receiptId || '—'}</p>
+            <p className="muted">The company received only this boolean and receipt. Nothing else.</p>
+          </div>
+        )}
 
-      {error && (
-        <div className="card">
-          <h2>❌ Could not generate proof</h2>
-          <p className="muted">{error}</p>
-          <p className="muted">
-            This usually means a requested statement is false — for example, the amanaId
-            the company holds belongs to a different wallet. ZK proofs of false statements
-            are impossible, so the request was denied automatically.
-          </p>
-        </div>
-      )}
-    </>
+        {error && (
+          <div className="card">
+            <div className="row">
+              <span className="fail-pop">✕</span>
+              <h2 style={{ margin: 0 }}>Could not generate proof</h2>
+            </div>
+            <p className="muted" style={{ marginTop: 12 }}>{error}</p>
+            <p className="muted">
+              This usually means a requested statement is false — for example, the amanaId
+              the company holds belongs to a different wallet. ZK proofs of false statements
+              are impossible, so the request was denied automatically.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

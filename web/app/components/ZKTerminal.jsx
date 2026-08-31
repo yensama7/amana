@@ -5,8 +5,9 @@
 // Poseidon hash formula that binds the private data to the commitment.
 //
 // Props:
-//   proving  — 'all' | 'submitting' | null (from wallet proving state)
-//   claims   — string[] of circuit names currently being proved
+//   proving   — 'all' | 'submitting' | null (from wallet proving state)
+//   claims    — string[] of circuit names currently being proved
+//   claimDone — { [circuit]: true } flips live as each Worker finishes its proof
 import { useEffect, useState } from 'react';
 
 // Approximate constraint counts per circuit — determined at compile time by
@@ -24,7 +25,7 @@ const CONSTRAINTS = {
 // against the issuer-signed commitment. If anything is wrong, the proof fails.
 const FORMULA = 'Poseidon( nin, bvn, dob, state, citizenship, secret, salt ) → commitment';
 
-export default function ZKTerminal({ proving, claims }) {
+export default function ZKTerminal({ proving, claims, claimDone = {} }) {
   // Elapsed time since proving started — displayed to show how fast the circuits run.
   const [elapsed, setElapsed] = useState(0);
 
@@ -37,28 +38,33 @@ export default function ZKTerminal({ proving, claims }) {
 
   if (!proving) return null;
 
-  const done = proving === 'submitting';
+  const submitting = proving === 'submitting';
+  const doneCount = claims.filter((c) => claimDone[c]).length;
 
   return (
     <div style={{
-      fontFamily: 'monospace', fontSize: '0.78rem',
-      background: '#060f08', border: '1px solid #1a3a22',
-      borderRadius: 6, padding: '10px 14px', margin: '10px 0',
-      color: '#00d97f', lineHeight: 1.7,
+      fontFamily: 'var(--mono)', fontSize: '0.78rem',
+      background: '#04120a', border: '1px solid #1a3a22',
+      borderRadius: 8, padding: '12px 16px', margin: '10px 0',
+      color: '#00d97f', lineHeight: 1.8,
     }}>
-      <div style={{ color: '#3a7a4a', marginBottom: 4 }}>
-        {'// Amana ZK Terminal'} &nbsp;&nbsp; elapsed: {elapsed}s
+      <div style={{ color: '#3a7a4a', marginBottom: 4, display: 'flex', justifyContent: 'space-between' }}>
+        <span>{'// Amana ZK Terminal'}</span>
+        <span>{doneCount}/{claims.length} proofs · {elapsed}s</span>
       </div>
       <div style={{ color: '#7fffbb', marginBottom: 8 }}>
         {'> '}{FORMULA}
       </div>
-      {claims.map(c => (
-        <div key={c} style={{ color: done ? '#00d97f' : '#a0ffcc' }}>
-          {done ? '✓' : '⟳'} {c}
-          <span style={{ color: '#3a7a4a', marginLeft: 8 }}>{CONSTRAINTS[c]}</span>
-        </div>
-      ))}
-      {done && (
+      {claims.map(c => {
+        const done = submitting || claimDone[c];
+        return (
+          <div key={c} style={{ color: done ? '#00d97f' : '#5a8a6a' }}>
+            {done ? '✓' : '⟳'} {c}
+            <span style={{ color: '#3a7a4a', marginLeft: 8 }}>{CONSTRAINTS[c]}</span>
+          </div>
+        );
+      })}
+      {submitting && (
         <div style={{ color: '#ffffff', marginTop: 8 }}>
           {'→'} groth16.verify() on gateway…
         </div>
