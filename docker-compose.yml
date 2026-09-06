@@ -28,7 +28,7 @@ services:
     ports:
       # Host port 4200 (not 4000): Windows/Hyper-V often reserves the
       # 3900-4100 range. Inside the compose network it is still :4000.
-      - "4200:4000"        # exposed for the smoke test (api/test/smoke.js)
+      - "8000:4000"        # exposed for the smoke test (api/test/smoke.js)
 
   web:
     build:

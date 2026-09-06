@@ -15,9 +15,8 @@ const path = require('path');
 const snarkjs = require('snarkjs');
 const { buildPoseidon } = require('circomlibjs');
 
-// 4200 = the host-side port docker-compose publishes (4000 is often a
-// Windows reserved port). Override with API_URL for other setups.
-const API = process.env.API_URL || 'http://localhost:4200';
+// 8000 = the host-side port docker-compose publishes. Override with API_URL for other setups.
+const API = process.env.API_URL || 'http://localhost:8000';
 // wasm/zkey artifacts as the browser would load them
 const ZK = path.join(__dirname, '..', '..', 'web', 'public', 'zk');
 
