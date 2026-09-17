@@ -15,23 +15,38 @@ import { useEffect, useRef, useState } from 'react';
 
 // Swift Loan's company ID — must match the id used to derive the citizen's amanaId
 // in the Amana Way app: amanaId = Poseidon(walletSecret, '1001').
+// If this ID changes, every citizen's Swift Loan amanaId changes too.
 const RP = { id: '1001', name: 'Swift Loan' };
 
 // The minimum credit score Swift Loan requires.
-// The citizen proves "my score ≥ 600" without revealing the actual number.
+// The citizen proves "my score >= 600" without revealing the actual number.
 const MIN_SCORE = 600;
 
 export default function SwiftLoan() {
+  // The amanaId the citizen pastes from the wallet — a large decimal integer
+  // (the Poseidon hash output) that uniquely identifies this citizen to Swift Loan.
   const [amanaId, setAmanaId] = useState('');
-  const [phase, setPhase] = useState('idle'); // idle | waiting | done | blocked
+
+  // Current UI phase:
+  //   idle     — form visible, waiting for the citizen to paste and click
+  //   waiting  — request created, polling gateway every 2s for a verdict
+  //   done     — citizen responded (approved or denied); outcome is set
+  //   blocked  — citizen had revoked Swift Loan; gateway returned 403
+  const [phase, setPhase] = useState('idle');
+
+  // The gateway verdict once the request resolves: { ok: bool, receiptId, status }.
   const [outcome, setOutcome] = useState(null);
+
+  // Ref to hold the setInterval handle so we can clear it on unmount or on result.
   const timerRef = useRef(null);
 
-  // Clear the outcome poller if the page unmounts mid-wait.
+  // Clear the outcome poller if the page unmounts mid-wait, preventing a
+  // state update on an unmounted component.
   useEffect(() => () => clearInterval(timerRef.current), []);
 
   async function apply() {
-    // The amanaId is a Poseidon hash output — always a large decimal integer.
+    // Validate that the input is a pure decimal integer — all Poseidon hash
+    // outputs are large decimal numbers, never hex or alphanumeric.
     if (!/^\d+$/.test(amanaId.trim())) {
       alert('Paste your Swift Loan amanaId from the Amana Way app (a long number).');
       return;
@@ -39,6 +54,8 @@ export default function SwiftLoan() {
     setOutcome(null);
 
     // POST /api/request — the gateway creates a pending request and returns a requestId.
+    // Supplying amanaId tells the gateway to include the id_ownership claim.
+    // Supplying minScore tells the gateway to include the credit_score_gte claim.
     // If the citizen has revoked Swift Loan, the gateway returns 403 immediately
     // and no request is even created (the revocation check is the first gate).
     const res = await fetch('/api/request', {
@@ -53,18 +70,24 @@ export default function SwiftLoan() {
     });
 
     if (res.status === 403) {
-      // Citizen revoked Swift Loan — the live alert should also fire in Amana Way.
+      // Citizen has revoked Swift Loan. Show the block message and stop here —
+      // no requestId exists to poll, so no interval is started.
       setPhase('blocked');
       return;
     }
     const { requestId } = await res.json();
 
-    // Poll GET /api/requests/:id every 2 seconds until the citizen responds.
-    // Status transitions: pending → verified | failed | denied.
+    // Poll GET /api/requests/:id every 2 seconds until the citizen responds
+    // in the Amana Way app. Status transitions:
+    //   pending   → citizen hasn't acted yet (keep polling)
+    //   verified  → proofs passed; loan pre-approved
+    //   failed    → proofs were submitted but gateway rejected one or more
+    //   denied    → citizen pressed "Deny" in the wallet
     setPhase('waiting');
     timerRef.current = setInterval(async () => {
       const r = await fetch(`/api/requests/${requestId}`).then((x) => x.json());
       if (r.status !== 'pending') {
+        // Request settled — stop polling and display the outcome.
         clearInterval(timerRef.current);
         setOutcome(r);
         setPhase('done');
@@ -74,6 +97,8 @@ export default function SwiftLoan() {
 
   return (
     <div className="site site-swift">
+
+      {/* Lender header: logo and minimal navigation to look like a real financial product */}
       <header className="site-header">
         <span className="logo">⚡ Swift Loan</span>
         <nav>
@@ -85,6 +110,8 @@ export default function SwiftLoan() {
         <span className="cta">Get started</span>
       </header>
 
+      {/* Hero: value proposition from the lender's perspective.
+          Deliberately does NOT mention NIN, BVN, or documents — they don't exist here. */}
       <div className="site-hero">
         <span className="site-eyebrow">Loans up to ₦5,000,000</span>
         <h1>Money in your account <em>in minutes</em>, not days.</h1>
@@ -95,25 +122,38 @@ export default function SwiftLoan() {
       </div>
 
       <div className="site-body">
+        {/* Feature tiles: three selling points that reinforce the ZK privacy message */}
         <div className="feature-tiles">
           <div className="tile"><b>⏱ 3-minute decision</b><span>Instant cryptographic verification, no manual review.</span></div>
           <div className="tile"><b>🔒 Zero data collected</b><span>We verify facts about you without ever seeing your data.</span></div>
           <div className="tile"><b>📉 From 3.5% monthly</b><span>Better verification means better rates.</span></div>
         </div>
 
+        {/* Application form card: the four verification requirements and the amanaId input.
+            The absence of a BVN/NIN field is the most important thing to notice here. */}
         <div className="site-card">
           <h2>Apply for a loan</h2>
           <p>To process your application we verify four facts through <b>Amana Gateway</b>:</p>
+
+          {/* Requirement list: each item shows what is verified and what stays private.
+              The lock icons reinforce that the zero-knowledge guarantee is per-claim,
+              not just for the overall transaction. */}
           <ul className="req-list">
             <li><span className="tick">✓</span> You are 18 or older <span className="lock">🔒 birthday stays private</span></li>
             <li><span className="tick">✓</span> You are a Nigerian citizen <span className="lock">🔒 zero-knowledge proof</span></li>
             <li><span className="tick">✓</span> The amanaId you provide is really yours <span className="lock">🔒 NIN/BVN stay private</span></li>
             <li><span className="tick">✓</span> Credit score of {MIN_SCORE} or above <span className="lock">🔒 actual score stays private</span></li>
           </ul>
+
           <p className="muted">
             Paste your Swift Loan amanaId from the <a href="/wallet">Amana Way app</a>.
             Notice: there is no BVN or NIN field on this form — we never ask, and we never see them.
           </p>
+
+          {/* Input row: the amanaId field + apply button.
+              The font is monospace because the amanaId is a large integer that looks
+              better in a fixed-width font. The button is disabled while waiting for
+              the citizen to respond to avoid duplicate requests. */}
           <div className="row">
             <input
               value={amanaId}
@@ -123,15 +163,23 @@ export default function SwiftLoan() {
             />
             <button onClick={apply} disabled={phase === 'waiting'}>Apply for loan</button>
           </div>
+
+          {/* Demo tip: pastes the wrong company's amanaId to show that the
+              id_ownership proof fails when the amanaId was derived for a different rpId.
+              This is a deliberate negative demo — ZK cannot prove false statements. */}
           <p className="muted" style={{ marginTop: 14 }}>
             💡 Demo tip: paste your <i>ABC Loan</i> amanaId instead to watch ownership verification
             fail — proving ownership of another company&rsquo;s ID is cryptographically impossible.
           </p>
+
+          {/* Trust strip: compliance and technology attribution */}
           <div className="trust-strip">
             🔐 Identity verification powered by <b>Amana Gateway</b> — zero-knowledge proofs, licensed under the NDPR
           </div>
         </div>
 
+        {/* Waiting state: shown while polling for the citizen's response.
+            The spinner is CSS-animated; the main thread is not blocked. */}
         {phase === 'waiting' && (
           <div className="site-card">
             <p>
@@ -145,6 +193,9 @@ export default function SwiftLoan() {
           </div>
         )}
 
+        {/* Blocked state: citizen revoked Swift Loan before this request.
+            The gateway rejected the POST /api/request call entirely — no request
+            ID was issued, nothing was added to the audit log as pending. */}
         {phase === 'blocked' && (
           <div className="site-card">
             <h2>🚫 Request blocked</h2>
@@ -156,9 +207,13 @@ export default function SwiftLoan() {
           </div>
         )}
 
+        {/* Done state: request settled. outcome.ok is the gateway's Groth16 verdict.
+            receiptId is a UUID the lender can use as an audit reference.
+            This is ALL Swift Loan ever receives — one boolean and one receipt. */}
         {phase === 'done' && outcome && (
           <div className="site-card">
             <div className="row">
+              {/* Large check or cross makes the verdict unmissable in a live demo */}
               <span className={outcome.ok ? 'success-pop' : 'fail-pop'}>{outcome.ok ? '✓' : '✕'}</span>
               <h2 style={{ margin: 0 }}>{outcome.ok ? 'Loan pre-approved!' : 'Verification failed'}</h2>
             </div>
@@ -174,6 +229,7 @@ export default function SwiftLoan() {
             </p>
           </div>
         )}
+
       </div>
     </div>
   );

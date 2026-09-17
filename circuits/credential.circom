@@ -39,9 +39,16 @@ template CredentialCheck() {
     signal input salt;        // Random blinding factor chosen at issuance
 
     // Public: the registry-signed commitment.
+    // The prover claims their private inputs hash to this value;
+    // the verifier only ever sees this number, never the inputs themselves.
     signal input commitment;
 
+    // Poseidon hash over 7 field elements — designed for efficient ZK computation.
+    // The input count (7) must match the number of inputs passed below.
     component h = Poseidon(7);
+
+    // Wire each private signal into the hash in the order registry.js uses.
+    // The order is load-bearing: swapping any two inputs produces a different hash.
     h.inputs[0] <== nin;
     h.inputs[1] <== bvn;
     h.inputs[2] <== dob;
@@ -51,5 +58,7 @@ template CredentialCheck() {
     h.inputs[6] <== salt;
 
     // The re-computed hash MUST equal the signed commitment.
+    // This constraint is the cryptographic guarantee: the private inputs are real,
+    // because fake ones would produce a different hash and this constraint would fail.
     h.out === commitment;
 }

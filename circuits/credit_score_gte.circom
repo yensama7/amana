@@ -26,38 +26,47 @@ include "circomlib/circuits/comparators.circom";
  */
 template CreditScoreGte() {
     // ---- private (stay on the citizen's device) ----
-    signal input score;       // e.g. 720
-    signal input activeLoans; // e.g. 2
-    signal input defaults;    // e.g. 0
-    signal input secret;      // same wallet secret as the identity credential
-    signal input salt;        // this credential's own blinding randomness
+    signal input score;       // the actual credit score (e.g. 720) — stays completely private
+    signal input activeLoans; // number of currently open loans (e.g. 2) — not revealed
+    signal input defaults;    // number of past defaults (e.g. 0) — not revealed
+    signal input secret;      // same wallet secret as the identity credential (wallet binding)
+    signal input salt;        // this credential's own blinding randomness (per-credential)
 
-    // ---- public ----
-    signal input creditCommitment; // bureau-signed commitment
-    signal input rpId;             // the lender asking
-    signal input nonce;            // one-time value (anti-replay)
-    signal input minScore;         // the threshold the lender requires
+    // ---- public (visible to the verifier / gateway) ----
+    signal input creditCommitment; // bureau-signed commitment sealing the five private fields
+    signal input rpId;             // the lender asking (binds proof to this company)
+    signal input nonce;            // one-time value (anti-replay — single-use per request)
+    signal input minScore;         // the threshold the lender requires (e.g. 650)
 
     // 1. The private values must match the bureau-signed commitment.
+    //    Re-computes Poseidon(score, activeLoans, defaults, secret, salt) and checks it
+    //    equals creditCommitment. This prevents using an invented score.
+    //    NOTE: input order must match registry.js hash() call for credit credentials.
     component h = Poseidon(5);
     h.inputs[0] <== score;
     h.inputs[1] <== activeLoans;
     h.inputs[2] <== defaults;
     h.inputs[3] <== secret;
     h.inputs[4] <== salt;
+    // The re-computed hash must equal the bureau's signed commitment.
     h.out === creditCommitment;
 
     // 2. minScore <= score, i.e. "score is at least the threshold".
-    //    16 bits is plenty — credit scores are small numbers, and score
-    //    is honest by construction (pinned by the commitment above).
+    //    16 bits is plenty — credit scores are small numbers (typically 300–850),
+    //    and score is honest by construction (pinned by the commitment above).
+    //    LessEqThan(n) checks in[0] <= in[1].
     component le = LessEqThan(16);
-    le.in[0] <== minScore;
-    le.in[1] <== score;
-    le.out === 1;
+    le.in[0] <== minScore; // the lender's required minimum
+    le.in[1] <== score;    // the citizen's actual score
+    le.out === 1;          // constraint: minScore must be <= score
 
     // 3. Bind rpId + nonce into the math (anti-replay).
+    //    rpId is NOT otherwise used in this circuit (unlike id_ownership), so
+    //    we need an explicit constraint to prevent the compiler from dropping it.
     signal rpNonce;
     rpNonce <== rpId * nonce;
 }
 
+// The four public inputs. creditCommitment anchors to the bureau's signed credential;
+// rpId + nonce make it single-use; minScore is the threshold being proved against.
 component main {public [creditCommitment, rpId, nonce, minScore]} = CreditScoreGte();

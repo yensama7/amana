@@ -17,6 +17,7 @@ import ZKTerminal from '../components/ZKTerminal';
 
 // Human-readable descriptions of what each circuit actually proves.
 // The consent screen shows EXACTLY these labels — nothing more is disclosed.
+// This is intentional: the citizen knows what they're consenting to, phrase by phrase.
 const CLAIM_LABELS = {
   age_gte_18:       'You are 18 or older (your date of birth stays private)',
   citizenship_ng:   'You are a Nigerian citizen',
@@ -33,18 +34,55 @@ const COMPANIES = [
 ];
 
 export default function Wallet() {
-  const [creds, setCreds] = useState(null);      // { identity, credit } — loaded from gateway
-  const [amanaIds, setAmanaIds] = useState(null); // { [companyId]: derived BigInt string }
-  const [request, setRequest] = useState(null);   // pending consent request from a company
-  const [proving, setProving] = useState(null);   // 'all' | 'submitting' | null
-  const [claimDone, setClaimDone] = useState({}); // { [circuit]: true } as each proof lands
-  const [result, setResult] = useState(null);     // last gateway verdict { ok, receiptId }
+  // { identity, credit } loaded from GET /api/credential on mount.
+  // Both are objects with { attrs, commitment, signature, issuerPublicKey }.
+  const [creds, setCreds] = useState(null);
+
+  // Derived amanaIds: { [companyId]: string } — Poseidon(secret, companyId) for each company.
+  // Computed locally from creds.identity.attrs.secret — never sent to the server.
+  const [amanaIds, setAmanaIds] = useState(null);
+
+  // The most recent pending consent request from a company, or null if none.
+  // Polled from GET /api/requests/pending every 2 seconds while idle.
+  const [request, setRequest] = useState(null);
+
+  // Proving phase:
+  //   null        — idle, nothing is proving
+  //   'all'       — one Worker per circuit running, proofs not yet complete
+  //   'submitting' — all proofs generated, POST /api/verify in flight
+  const [proving, setProving] = useState(null);
+
+  // Per-circuit completion flags: { [circuit]: true } flips as each Worker finishes.
+  // Passed into ZKTerminal to update the progress display in real-time.
+  const [claimDone, setClaimDone] = useState({});
+
+  // Last gateway verdict from POST /api/verify: { ok: bool, receiptId: string }.
+  const [result, setResult] = useState(null);
+
+  // Error message if proof generation fails (false statement, worker crash, etc.).
   const [error, setError] = useState(null);
-  const [tick, setTick] = useState(0);            // main-thread liveness counter (increments 10x/sec)
-  const [copied, setCopied] = useState(null);     // companyId whose amanaId was just copied
-  const [warmed, setWarmed] = useState(false);    // proving artifacts preloaded into Cache API
-  const [loadError, setLoadError] = useState(null); // credential/poseidon load failed — show retry, not an eternal spinner
+
+  // Liveness counter: increments 10 times per second on the MAIN thread.
+  // If proofs ran on the main thread, this number would freeze during proving.
+  // Its smooth increment proves that Web Workers handle the heavy computation.
+  const [tick, setTick] = useState(0);
+
+  // Which company's amanaId was most recently copied; used to show a "✓ Copied" flash.
+  const [copied, setCopied] = useState(null);
+
+  // True once all .wasm and .zkey artifacts have been preloaded into the Cache API.
+  // Warm cache means the first approval proves at full speed with no download stall.
+  const [warmed, setWarmed] = useState(false);
+
+  // Error message from the initial credential/Poseidon load. Shown as a retry card
+  // instead of an eternal spinner (e.g. if the gateway hasn't started yet).
+  const [loadError, setLoadError] = useState(null);
+
+  // Poseidon hasher instance, cached after first load so it doesn't rebuild
+  // on every re-render. Must match the circuits' implementation exactly.
   const poseidonRef = useRef(null);
+
+  // True while any proving activity is in progress — used to pause the consent poller.
   const busy = proving !== null;
 
   // Build and cache the Poseidon hasher — same implementation the Circom circuits use,
@@ -59,7 +97,7 @@ export default function Wallet() {
 
   // On mount: load credentials from the gateway, then derive amanaIds locally.
   // In a real deployment, credentials live in secure on-device storage; the gateway
-  // serving them here is a hackathon shortcut.
+  // serving them here is a hackathon shortcut (see db.js for the "attrs" columns).
   useEffect(() => {
     (async () => {
       try {
@@ -70,6 +108,7 @@ export default function Wallet() {
         for (const co of COMPANIES) {
           // amanaId = Poseidon(walletSecret, companyId)
           // This is a one-way function: given amanaId + companyId you cannot recover the secret.
+          // Different companies get different IDs for the same citizen (unlinkability).
           ids[co.id] = poseidon.F.toString(poseidon([BigInt(c.identity.attrs.secret), BigInt(co.id)]));
         }
         setAmanaIds(ids);
@@ -82,19 +121,22 @@ export default function Wallet() {
   }, []);
 
   // Warm the proof-artifact cache in the background: pull every .wasm/.zkey into
-  // the same 'zk-v1' Cache API bucket the prover worker reads from, so the FIRST
+  // the same 'zk-v2' Cache API bucket the prover worker reads from, so the FIRST
   // approval of the demo proves at full speed instead of stalling on ~10MB of downloads.
+  // Uses the same cache version string as sw.js and prover.worker.js — all three must agree.
   useEffect(() => {
     if (typeof caches === 'undefined') return;
     (async () => {
       try {
-        const cache = await caches.open('zk-v2'); // version must match sw.js KEEP list
+        const cache = await caches.open('zk-v2');
         for (const circuit of Object.keys(CLAIM_LABELS)) {
           for (const ext of ['wasm', 'zkey']) {
             const url = `/zk/${circuit}.${ext}`;
+            // Only fetch if not already cached — avoids re-downloading on every wallet open.
             if (!(await cache.match(url))) {
               const res = await fetch(url);
-              // Never cache an error response as a proving artifact.
+              // Never cache an error response as a proving artifact — snarkjs would fail
+              // on every subsequent proving attempt until the cache was manually cleared.
               if (res.ok) await cache.put(url, res);
             }
           }
@@ -105,12 +147,15 @@ export default function Wallet() {
   }, []);
 
   // While idle, poll the gateway every 2 seconds for pending consent requests.
-  // Stops polling during proof generation (busy = true) to avoid race conditions.
+  // Stops polling during proof generation (busy = true) to avoid race conditions
+  // where a new consent request arrives while an existing one is being proved.
   useEffect(() => {
     if (busy) return;
     const t = setInterval(async () => {
       try {
         const rows = await fetch('/api/requests/pending').then((r) => r.json());
+        // Show only the most recent pending request (rows[0]).
+        // Multiple pending requests are possible but unusual; the citizen handles them one at a time.
         setRequest(rows[0] || null);
       } catch { /* gateway briefly unreachable; next tick retries */ }
     }, 2000);
@@ -135,6 +180,7 @@ export default function Wallet() {
       worker.onmessage = (e) => {
         worker.terminate();
         // If the worker returns an error, the statement was FALSE (ZK cannot prove false claims).
+        // This is an expected "error" — the wallet catches it and sends a deny to the gateway.
         e.data.error ? reject(new Error(`${circuit}: ${e.data.error}`)) : resolve(e.data);
       };
       worker.onerror = (e) => { worker.terminate(); reject(new Error(e.message || 'worker error')); };
@@ -146,8 +192,10 @@ export default function Wallet() {
   // Every identity circuit shares the same base (idBase) which pins the proof to:
   //   - the signed commitment (so you're proving about YOUR credential)
   //   - rpId + nonce (so the proof is bound to THIS request — replay impossible)
+  // The credit circuit uses a separate creditCommitment from the bureau-issued credential.
   function buildInputs(rq) {
     const a = creds.identity.attrs;
+    // idBase: private fields + the three public values that bind this proof to this request.
     const idBase = {
       nin: a.nin, bvn: a.bvn, dob: a.dob, state: a.state,
       citizenship: a.citizenship, secret: a.secret, salt: a.salt,
@@ -156,10 +204,14 @@ export default function Wallet() {
     };
     const c = creds.credit?.attrs;
     return {
+      // age_gte_18 also needs the cutoff date (today minus 18 years as YYYYMMDD)
       age_gte_18:       { ...idBase, cutoffDate: String(rq.cutoff_date) },
+      // citizenship_ng only needs the base inputs — the constraint is `citizenship === 566`
       citizenship_ng:   idBase,
+      // id_ownership also needs the amanaId the company holds
       id_ownership:     { ...idBase, amanaId: rq.amana_id },
       // Credit circuit uses a separate commitment (bureau-issued), not the identity one.
+      // c may be undefined if the request doesn't include a credit claim.
       credit_score_gte: c && {
         score: c.score, activeLoans: c.activeLoans, defaults: c.defaults,
         secret: c.secret, salt: c.salt,
@@ -178,16 +230,18 @@ export default function Wallet() {
     try {
       // Run all required circuits simultaneously — one Worker thread each.
       // On a 4-core device, 4 proofs take roughly the same time as 1 proof sequentially.
-      // Each promise also flips its claim's ✓ in the ZK terminal as it lands.
+      // Each promise also flips its claim's check mark in the ZK terminal as it lands.
       const proofResults = await Promise.all(
         request.claims.map(claim =>
           prove(claim, inputsByCircuit[claim]).then((r) => {
+            // Mark this specific circuit as done in the terminal display.
             setClaimDone((d) => ({ ...d, [claim]: true }));
             return r;
           })
         )
       );
       // Reshape array of results into { circuit: { proof, publicSignals } } for the gateway.
+      // The gateway expects exactly this shape in POST /api/verify.
       const proofs = Object.fromEntries(
         proofResults.map(r => [r.circuit, { proof: r.proof, publicSignals: r.publicSignals }])
       );
@@ -202,18 +256,24 @@ export default function Wallet() {
       // Proving failed — most likely a false statement (e.g. the company holds a different
       // wallet's amanaId). ZK cannot prove false statements; the request is denied cleanly.
       setError(err.message);
+      // Send an explicit deny so the audit log records this as 'denied' rather than
+      // leaving the request in 'pending' forever (the nonce would still be burned).
       await fetch(`/api/requests/${request.id}/deny`, { method: 'POST' }).catch(() => {});
     } finally {
+      // Reset proving state regardless of success or failure.
       setProving(null);
       setRequest(null);
     }
   }
 
   async function deny() {
+    // POST /api/requests/:id/deny flips the request status to 'denied' and writes
+    // an audit row so the citizen's dashboard shows this decision.
     await fetch(`/api/requests/${request.id}/deny`, { method: 'POST' });
     setRequest(null);
   }
 
+  // Copy an amanaId to the clipboard and show a brief "✓ Copied" flash on the button.
   function copyId(coId) {
     navigator.clipboard.writeText(amanaIds[coId]).then(() => {
       setCopied(coId);
@@ -224,6 +284,10 @@ export default function Wallet() {
   return (
     <div className="amana-bg">
       <div className="main">
+
+        {/* Wallet header: title, badge, and proving-key warm-up status.
+            The warm-up status tells the citizen whether the first approval will
+            be instant (keys cached) or may take a few seconds (still downloading). */}
         <div className="row" style={{ marginBottom: 20 }}>
           <h1 style={{ margin: 0, fontSize: 24 }}>📱 Amana Way</h1>
           <span className="badge neutral">your identity wallet</span>
@@ -234,6 +298,9 @@ export default function Wallet() {
           </span>
         </div>
 
+        {/* Load error card: shown if credentials couldn't be fetched on mount.
+            Displays the raw error message so a developer can debug immediately.
+            The most common cause is the gateway still starting up (docker boot). */}
         {loadError && (
           <div className="card">
             <div className="row">
@@ -249,15 +316,22 @@ export default function Wallet() {
           </div>
         )}
 
-        {/* --- Credential display ------------------------------------------------ */}
+        {/* Credential display card: shows the two signed credentials held by this wallet.
+            The fields listed are what the commitment seals — they are never transmitted.
+            The commitment string itself IS public (it's the hash output on-chain).
+            "Sealed on device" reminds the citizen (and judges) that attrs never leave. */}
         <div className="card">
           <h2>Your credentials</h2>
           {loadError ? (
+            // Suppress the loading spinner during error state — give a clear message instead.
             <p className="muted">Unavailable until the wallet reloads.</p>
           ) : !creds ? (
+            // Credentials are still loading from the gateway.
             <p className="muted"><span className="spinner" />Loading credentials from the gateway…</p>
           ) : (
             <>
+              {/* Identity credential: issued by the national registry via the NIMC Trust Bridge.
+                  Covers NIN, BVN, date of birth, state, citizenship. */}
               <div className="cred-card">
                 <div className="cred-top">
                   <span>National Identity Credential</span>
@@ -267,11 +341,16 @@ export default function Wallet() {
                 <div className="fields">
                   Contains (never transmitted): NIN · BVN · date of birth · state · citizenship
                 </div>
+                {/* The full commitment is displayed so judges can verify it matches
+                    what the gateway signed (GET /api/credential returns it). */}
                 <div className="chipline">commitment {creds.identity.commitment}</div>
                 <div className="fields" style={{ marginTop: 6 }}>
                   ✒️ Signed by the National Registry via the NIMC Trust Bridge
                 </div>
               </div>
+
+              {/* Credit credential: issued by the credit bureau.
+                  Covers score, active loans, defaults. Only shown if issued. */}
               {creds.credit && (
                 <div className="cred-card credit">
                   <div className="cred-top">
@@ -292,7 +371,10 @@ export default function Wallet() {
           )}
         </div>
 
-        {/* --- AmanaId display --------------------------------------------------- */}
+        {/* AmanaId display card: one row per company.
+            Each ID is Poseidon(secret, companyId) — mathematically unique per company.
+            The "Copy" button is the main citizen action: they paste this into the lender's form.
+            The IDs being different for each company is the unlinkability guarantee. */}
         <div className="card">
           <h2>Your amanaIds</h2>
           <p className="muted">
@@ -308,8 +390,13 @@ export default function Wallet() {
           ) : (
             COMPANIES.map((co) => (
               <div className="amana-row" key={co.id}>
+                {/* Company name label */}
                 <span className="co">{co.name}</span>
+                {/* The amanaId itself — a large decimal integer (Poseidon output).
+                    Displayed in full so the citizen can verify it matches what they pasted. */}
                 <span className="id">{amanaIds[co.id]}</span>
+                {/* Copy button: writes the amanaId to the clipboard and shows a
+                    transient "✓ Copied" state for 1.5 seconds to confirm success. */}
                 <button
                   className={`copy-btn ${copied === co.id ? 'copied' : ''}`}
                   onClick={() => copyId(co.id)}
@@ -321,7 +408,10 @@ export default function Wallet() {
           )}
         </div>
 
-        {/* --- Consent request --------------------------------------------------- */}
+        {/* Consent request card: shown when a pending request arrives from a company.
+            Hidden while proving (busy) because the approval buttons are meaningless mid-proof.
+            The claim list is translated to human-readable labels via CLAIM_LABELS so the
+            citizen knows exactly what will be proved — no cryptographic jargon. */}
         {request && !busy && (
           <div className="card elevated">
             <h2>🔔 Consent request from {request.rp_name}</h2>
@@ -330,6 +420,7 @@ export default function Wallet() {
               {request.claims.map((c) => (
                 <li key={c}>
                   <span className="ico">🔐</span>
+                  {/* CLAIM_LABELS[c] is the plain-English description of what this circuit proves */}
                   {CLAIM_LABELS[c]}
                 </li>
               ))}
@@ -339,23 +430,34 @@ export default function Wallet() {
               leave your wallet. No raw data (NIN, BVN, score, birthday) is ever transmitted.
             </p>
             <div className="row">
+              {/* Approve triggers proof generation for all claims in parallel.
+                  Disabled if credentials haven't loaded yet (no inputs to build). */}
               <button onClick={approve} disabled={!creds}>Approve &amp; generate proofs</button>
+              {/* Deny sends POST /api/requests/:id/deny and removes the request from view */}
               <button className="ghost" onClick={deny}>Deny</button>
             </div>
           </div>
         )}
 
-        {/* --- Proving in progress ----------------------------------------------- */}
+        {/* Proving-in-progress card: shown while one or more Workers are running.
+            The ZKTerminal component provides a live per-circuit progress display.
+            The liveness counter below the terminal is the visual proof that the
+            main thread is NOT blocked during SNARK computation. */}
         {busy && (
           <div className="card elevated">
             <h2><span className="spinner" />Generating proofs in Web Workers…</h2>
             <p>
               {proving === 'submitting'
+                // All proofs are done; now waiting for the gateway to run groth16.verify()
                 ? 'All proofs generated — submitting to the gateway for Groth16 verification…'
                 : `Proving ${request?.claims?.length ?? ''} claims in parallel, one CPU thread each…`}
             </p>
-            {/* ZKTerminal visualises the Poseidon hash formula and per-circuit progress */}
+            {/* ZKTerminal shows the Poseidon formula + per-circuit tick marks.
+                proving, claims, and claimDone are passed down as controlled props. */}
             <ZKTerminal proving={proving} claims={request?.claims ?? []} claimDone={claimDone} />
+            {/* The liveness counter: its smooth increment proves the UI is not frozen.
+                If proofs ran synchronously on the main thread this number would stop
+                incrementing for several seconds during each circuit. */}
             <p className="muted">
               Main thread is still alive — liveness counter: <b>{tick}</b> (it
               would freeze if we proved on the UI thread instead of Web Workers).
@@ -363,7 +465,9 @@ export default function Wallet() {
           </div>
         )}
 
-        {/* --- Outcome ----------------------------------------------------------- */}
+        {/* Outcome card: shows the final gateway verdict after all proofs are submitted.
+            ok = true means all Groth16 verifications passed.
+            receiptId is a UUID the lender can use as an audit reference. */}
         {result && (
           <div className="card elevated">
             <div className="row">
@@ -375,6 +479,9 @@ export default function Wallet() {
           </div>
         )}
 
+        {/* Error card: shown when proof generation fails (false statement, or a worker crash).
+            The most common cause during the demo is pastig the wrong amanaId into a lender —
+            the id_ownership circuit cannot prove a false claim, so it throws an error instead. */}
         {error && (
           <div className="card">
             <div className="row">
@@ -389,6 +496,7 @@ export default function Wallet() {
             </p>
           </div>
         )}
+
       </div>
     </div>
   );
