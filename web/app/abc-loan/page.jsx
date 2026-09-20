@@ -1,192 +1,263 @@
 'use client';
-// ABC Loan — mock lender (relying party) that requests only TWO proofs:
-//   age ≥ 18 and Nigerian citizenship.
-//
-// No credit check. No amanaId required. No ID ownership proof.
-//
-// This is INTENTIONAL — it demonstrates that ZK circuits are modular. A company
-// requests only the proofs it actually needs, and the citizen's wallet generates
-// only those specific circuits. The other credentials stay completely sealed.
-//
-// Compare with Swift Loan (four proofs) to see modular ZK in action.
-//
-// Flow:
-//   1. Citizen clicks "Check eligibility" (no ID to paste — ABC Loan doesn't need it).
-//   2. ABC Loan sends POST /api/request with just rpId + rpName (no amanaId, no minScore).
-//   3. Gateway derives claims: ['age_gte_18', 'citizenship_ng'].
-//   4. Consent appears in Amana Way → citizen approves → two proofs → gateway verifies.
+
 import { useEffect, useRef, useState } from 'react';
 
-// ABC Loan's company ID — 2002. The citizen's amanaId for this company is
-// Poseidon(walletSecret, '2002'), but ABC Loan never asks for it because
-// it does not need to verify ID ownership — only age and citizenship.
-const RP = { id: '2002', name: 'ABC Loan' };
+// ABC Loan — the "lightweight" relying party in the Amana Way demo.
+//
+// Unlike Swift Loan, ABC Loan never asks for an amanaId or a minScore.
+// It sends only { rpId, rpName } to the gateway, so the gateway derives
+// just two claims: age_gte_18 and citizenship_ng. The citizen's wallet
+// therefore only ever runs two circuits for this lender — no credit
+// commitment, no ID ownership proof, nothing beyond what's asked.
+//
+// Flow: check eligibility (Amana proof) -> if eligible, fill in loan
+// amount/purpose/term -> submit -> approved summary. The loan details
+// themselves never touch the Amana gateway; they're local to ABC Loan,
+// same as any lender's own application form would be.
+
+const RP_ID = '2002';
+const RP_NAME = 'ABC Loan';
+const POLL_INTERVAL_MS = 2000;
 
 export default function AbcLoan() {
-  // Current UI phase:
-  //   idle     — show the button, waiting for citizen to start
-  //   waiting  — request created, polling for the citizen's response
-  //   done     — citizen responded; outcome is set
-  //   blocked  — citizen had revoked ABC Loan; gateway returned 403
-  const [phase, setPhase] = useState('idle');
+  const [phase, setPhase] = useState('idle'); // 'idle' | 'waiting' | 'done' | 'blocked'
+  const [outcome, setOutcome] = useState(null); // { ok, receiptId, status } | null
+  const [error, setError] = useState(null);
+  const pollRef = useRef(null);
 
-  // The gateway verdict once the request resolves: { ok: bool, receiptId, status }.
-  const [outcome, setOutcome] = useState(null);
+  // Loan application form, shown only once outcome.ok is true.
+  const [form, setForm] = useState({ amount: '', purpose: '', termMonths: '' });
+  const [formError, setFormError] = useState(null);
+  const [application, setApplication] = useState(null); // submitted details, once approved
 
-  // Ref holds the setInterval handle so we can cancel it on unmount or resolution.
-  const timerRef = useRef(null);
-
-  // Clear the outcome poller if the page unmounts mid-wait, preventing a
-  // state update on an unmounted component.
-  useEffect(() => () => clearInterval(timerRef.current), []);
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   async function apply() {
+    setError(null);
     setOutcome(null);
+    setApplication(null);
 
-    // POST /api/request — no amanaId or minScore in the body, so the gateway
-    // builds only the two base claims: ['age_gte_18', 'citizenship_ng'].
-    // The claim list is derived server-side from what the company provides,
-    // not from a hardcoded list — this is what makes the system modular.
-    const res = await fetch('/api/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rpId: RP.id, rpName: RP.name }),
-    });
+    let res;
+    try {
+      res = await fetch('/api/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rpId: RP_ID, rpName: RP_NAME }),
+      });
+    } catch {
+      setError('Could not reach the Amana Gateway. Please try again.');
+      return;
+    }
 
     if (res.status === 403) {
-      // Citizen revoked ABC Loan — show the block message and stop.
       setPhase('blocked');
       return;
     }
-    const { requestId } = await res.json();
 
-    // Poll until the citizen responds in the Amana Way app.
-    // Same polling approach as Swift Loan — 2s interval, clears on any non-pending status.
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      console.error('ABC Loan: /api/request failed', res.status, body);
+      setError('Something went wrong starting verification. Please try again.');
+      return;
+    }
+
+    const { requestId } = await res.json();
     setPhase('waiting');
-    timerRef.current = setInterval(async () => {
-      const r = await fetch(`/api/requests/${requestId}`).then((x) => x.json());
-      if (r.status !== 'pending') {
-        clearInterval(timerRef.current);
-        setOutcome(r);
-        setPhase('done');
+    startPolling(requestId);
+  }
+
+  function startPolling(requestId) {
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    pollRef.current = setInterval(async () => {
+      let res;
+      try {
+        res = await fetch(`/api/requests/${requestId}`);
+      } catch {
+        return;
       }
-    }, 2000);
+
+      if (res.status === 404) {
+        clearInterval(pollRef.current);
+        setError('Verification request not found. Please try again.');
+        setPhase('idle');
+        return;
+      }
+
+      if (!res.ok) return;
+
+      const data = await res.json();
+      if (data.status === 'pending') return;
+
+      clearInterval(pollRef.current);
+      setOutcome({ ok: data.ok, receiptId: data.receiptId, status: data.status });
+      setPhase('done');
+    }, POLL_INTERVAL_MS);
+  }
+
+  function submitApplication(e) {
+    e.preventDefault();
+    setFormError(null);
+
+    const amountNum = Number(form.amount);
+    const termNum = Number(form.termMonths);
+
+    if (!form.amount || Number.isNaN(amountNum) || amountNum <= 0) {
+      setFormError('Enter a valid loan amount.');
+      return;
+    }
+    if (!form.purpose.trim()) {
+      setFormError('Tell us what the loan is for.');
+      return;
+    }
+    if (!form.termMonths || Number.isNaN(termNum) || termNum <= 0) {
+      setFormError('Enter a valid term in months.');
+      return;
+    }
+
+    // No separate loan API here — approval is already established by the
+    // Amana proof; this just records what was applied for.
+    setApplication({ amount: amountNum, purpose: form.purpose.trim(), termMonths: termNum });
+  }
+
+  function startOver() {
+    setPhase('idle');
+    setOutcome(null);
+    setError(null);
+    setApplication(null);
+    setForm({ amount: '', purpose: '', termMonths: '' });
   }
 
   return (
-    <div className="site site-abc">
-
-      {/* Lender header: different branding from Swift Loan to look like a separate company */}
-      <header className="site-header">
-        <span className="logo">🌤 ABC Loan</span>
-        <nav>
-          <span>Quick loans</span>
-          <span>How it works</span>
-          <span>About us</span>
-        </nav>
-        <span className="cta">Check eligibility</span>
-      </header>
-
-      {/* Hero: ABC Loan's minimal requirements — only two things needed */}
-      <div className="site-hero">
-        <span className="site-eyebrow">Micro-loans made simple</span>
-        <h1>Small loans, <em>zero paperwork.</em></h1>
+    <main>
+      <div className="card">
+        <h2>🏦 ABC Loan</h2>
+        <p>We verify exactly two things before you can apply:</p>
         <p>
-          We only need to know two things: that you&rsquo;re an adult and that
-          you&rsquo;re Nigerian. Nothing else. No ID numbers, no credit checks,
-          no documents.
+          <strong>age ≥ 18 · Nigerian citizen</strong>
         </p>
+        <p className="muted">
+          No ID to paste — open your Amana Way wallet after clicking below to approve the request.
+        </p>
+        <div className="row">
+          <button onClick={apply} disabled={phase === 'waiting'}>
+            {phase === 'waiting' ? 'Waiting for approval…' : 'Check eligibility'}
+          </button>
+        </div>
+        {error && <p className="muted">{error}</p>}
       </div>
 
-      <div className="site-body">
-        {/* Feature tiles: three points that reinforce the minimal-data theme.
-            The contrast with Swift Loan (no credit check, no ID) is deliberate — it
-            shows that the same infrastructure supports different KYC requirements. */}
-        <div className="feature-tiles">
-          <div className="tile"><b>✌️ Two facts only</b><span>Age and citizenship — that&rsquo;s our entire KYC.</span></div>
-          <div className="tile"><b>🙈 No credit check</b><span>Your credit history stays completely sealed.</span></div>
-          <div className="tile"><b>🪪 No ID required</b><span>We don&rsquo;t even ask for your amanaId.</span></div>
+      {phase === 'waiting' && (
+        <div className="card">
+          <p>
+            <span className="spinner" /> Waiting for you to approve this request in Amana Way…
+          </p>
         </div>
+      )}
 
-        {/* Eligibility card: the two claims ABC Loan verifies, with privacy labels.
-            Notice there is no amanaId input field — ABC Loan does not need one,
-            so the gateway never creates an id_ownership claim for this company. */}
-        <div className="site-card">
-          <h2>Check your eligibility</h2>
-          <p>ABC Loan verifies exactly two facts through <b>Amana Gateway</b>:</p>
+      {phase === 'blocked' && (
+        <div className="card">
+          <h2>🚫 Request blocked</h2>
+          <p>You've revoked ABC Loan's access in your Amana Way dashboard, so this request can't proceed.</p>
+        </div>
+      )}
 
-          {/* Only two requirements, versus four at Swift Loan — this is the
-              ZK modularity demo: each company asks for and receives exactly what
-              it needs, and no more. */}
-          <ul className="req-list">
-            <li><span className="tick">✓</span> You are 18 or older <span className="lock">🔒 birthday stays private</span></li>
-            <li><span className="tick">✓</span> You are a Nigerian citizen <span className="lock">🔒 zero-knowledge proof</span></li>
-          </ul>
+      {phase === 'done' && outcome && !outcome.ok && (
+        <div className="card">
+          <h2>❌ Not eligible</h2>
+          <p>
+            ok: {String(outcome.ok)}
+            {outcome.receiptId && (
+              <>
+                {' · receipt: '}
+                <span className="mono">{outcome.receiptId}</span>
+              </>
+            )}
+          </p>
+          <p className="muted">You don't meet ABC Loan's age or citizenship requirement.</p>
+        </div>
+      )}
 
-          {/* Instruction to open the wallet after clicking, since the consent screen
-              appears there, not here. The note about "2 of 4 circuits" makes the
-              modularity point explicit for technical observers. */}
+      {phase === 'done' && outcome && outcome.ok && !application && (
+        <div className="card">
+          <h2>✅ Eligible</h2>
+          <p>
+            ok: true
+            {outcome.receiptId && (
+              <>
+                {' · receipt: '}
+                <span className="mono">{outcome.receiptId}</span>
+              </>
+            )}
+          </p>
           <p className="muted">
-            After clicking, open the <a href="/wallet">Amana Way app</a> — the consent screen
-            will show exactly these two claims, and your wallet will generate only 2 of its
-            4 available circuits. ZK modularity in action: ask less, learn less.
+            ABC Loan only learned two facts about you — not your name, ID, or credit history. Fill in the loan
+            details below to finish applying.
           </p>
 
-          {/* Single button — no ID input needed.
-              Disabled while waiting to prevent duplicate requests. */}
-          <div className="row">
-            <button onClick={apply} disabled={phase === 'waiting'}>Check eligibility</button>
-          </div>
+          <form
+            onSubmit={submitApplication}
+            className="row"
+            style={{ flexDirection: 'column', alignItems: 'stretch', gap: 12 }}
+          >
+            <label>
+              Loan amount (₦)
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={form.amount}
+                onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                required
+              />
+            </label>
+            <label>
+              Purpose
+              <input
+                type="text"
+                value={form.purpose}
+                onChange={(e) => setForm({ ...form, purpose: e.target.value })}
+                required
+              />
+            </label>
+            <label>
+              Term (months)
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={form.termMonths}
+                onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
+                required
+              />
+            </label>
+            <button type="submit">Submit application</button>
+            {formError && <p className="muted">{formError}</p>}
+          </form>
+        </div>
+      )}
 
-          {/* Trust strip: same gateway, different lender — same privacy guarantee */}
-          <div className="trust-strip">
-            🔐 Identity verification powered by <b>Amana Gateway</b> — zero-knowledge proofs, licensed under the NDPR
+      {application && (
+        <div className="card">
+          <h2>✅ Loan approved</h2>
+          <p>
+            <strong>₦{application.amount.toLocaleString()}</strong> over {application.termMonths} months
+          </p>
+          <p className="muted">Purpose: {application.purpose}</p>
+          {outcome?.receiptId && (
+            <p className="muted">
+              Verified via Amana Way · receipt: <span className="mono">{outcome.receiptId}</span>
+            </p>
+          )}
+          <div className="row">
+            <button onClick={startOver}>Apply for another loan</button>
           </div>
         </div>
-
-        {/* Waiting state: shown while the citizen is on the consent screen */}
-        {phase === 'waiting' && (
-          <div className="site-card">
-            <p>
-              <span className="spinner" />
-              Waiting for you to approve the request in the <a href="/wallet">Amana Way app</a>…
-            </p>
-          </div>
-        )}
-
-        {/* Blocked state: citizen had previously revoked ABC Loan.
-            The gateway rejected the request before any proof was requested. */}
-        {phase === 'blocked' && (
-          <div className="site-card">
-            <h2>🚫 Request blocked</h2>
-            <p>
-              You have <b>revoked</b> ABC Loan&rsquo;s access on your Consent Dashboard.
-              The gateway refused the request before anything was processed.
-            </p>
-          </div>
-        )}
-
-        {/* Done state: shows the Groth16 verdict (true/false) and receipt.
-            Same structure as Swift Loan — one boolean, one receipt, nothing else. */}
-        {phase === 'done' && outcome && (
-          <div className="site-card">
-            <div className="row">
-              <span className={outcome.ok ? 'success-pop' : 'fail-pop'}>{outcome.ok ? '✓' : '✕'}</span>
-              <h2 style={{ margin: 0 }}>{outcome.ok ? 'You are eligible!' : 'Not eligible'}</h2>
-            </div>
-            <p style={{ marginTop: 12 }}>
-              Gateway verdict: <b>{String(outcome.ok)}</b>{' '}
-              {outcome.receiptId && (
-                <span className="mono">(receipt {outcome.receiptId})</span>
-              )}
-            </p>
-            <p className="muted">
-              ABC Loan received only that boolean. No age, no nationality, no personal data.
-            </p>
-          </div>
-        )}
-
-      </div>
-    </div>
+      )}
+    </main>
   );
 }
