@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 #
-# build-circuits.sh — one-shot ZK artifact builder for Amana Gateway.
+# build-circuits.sh â€” one-shot ZK artifact builder for Amana Gateway.
 #
 # For each circuit (age_gte_18, citizenship_ng, id_ownership, credit_score_gte) this script:
 #   1. compiles the .circom source to R1CS + a witness-generator .wasm
-#   2. runs a LOCAL powers-of-tau ceremony (2^13 — our circuits are only
+#   2. runs a LOCAL powers-of-tau ceremony (2^13 â€” our circuits are only
 #      a few hundred constraints each, so this is generous and fast)
 #   3. runs the Groth16 phase-2 setup to produce a proving key (.zkey)
 #   4. exports the verification key for the gateway
@@ -14,7 +14,7 @@
 #   api/zk/<circuit>.vkey.json             -> used by the gateway to verify
 #
 # SECURITY NOTE: this is a single-party dev "ceremony" with no external
-# contributions. Perfect for a hackathon, NOT for production — a real
+# contributions. Perfect for a hackathon, NOT for production â€” a real
 # deployment needs a multi-party trusted setup.
 #
 # Prereqs: circom >= 2.1 on PATH, snarkjs on PATH (npm i -g snarkjs), node.
